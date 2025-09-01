@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -194,6 +195,9 @@ class UserSession:
         self.has_unfinished_request = False
         self.last_unfinished_log = 0
 
+        # Thread lock to ensure data consistency
+        self._data_lock = threading.Lock()
+
         self.prompt_lengths = []
         self.generation_lengths = []
         self.ttfts = []
@@ -204,12 +208,13 @@ class UserSession:
         self.finished = False
 
     def _update_result(self, response: Response):
-        self.prompt_lengths.append(response.prompt_tokens)
-        self.generation_lengths.append(response.generation_tokens)
-        self.ttfts.append(response.ttft)
-        self.generation_times.append(response.generation_time)
-        self.launch_times.append(response.launch_time)
-        self.finish_times.append(response.finish_time)
+        with self._data_lock:
+            self.prompt_lengths.append(response.prompt_tokens)
+            self.generation_lengths.append(response.generation_tokens)
+            self.ttfts.append(response.ttft)
+            self.generation_times.append(response.generation_time)
+            self.launch_times.append(response.launch_time)
+            self.finish_times.append(response.finish_time)
 
     def _build_system_prompt(self):
 
@@ -326,15 +331,34 @@ class UserSession:
             return
 
     def summary(self) -> pd.DataFrame:
+        with self._data_lock:
+            # Ensure all lists have the same length
+            min_length = min(
+                len(self.prompt_lengths),
+                len(self.generation_lengths),
+                len(self.ttfts),
+                len(self.generation_times),
+                len(self.launch_times),
+                len(self.finish_times)
+            )
+            
+            # Truncate all lists to the minimum length to ensure consistency
+            prompt_lengths = self.prompt_lengths[:min_length]
+            generation_lengths = self.generation_lengths[:min_length]
+            ttfts = self.ttfts[:min_length]
+            generation_times = self.generation_times[:min_length]
+            launch_times = self.launch_times[:min_length]
+            finish_times = self.finish_times[:min_length]
+        
         df = pd.DataFrame()
-        df["prompt_tokens"] = self.prompt_lengths
-        df["generation_tokens"] = self.generation_lengths
-        df["ttft"] = self.ttfts
-        df["generation_time"] = self.generation_times
+        df["prompt_tokens"] = prompt_lengths
+        df["generation_tokens"] = generation_lengths
+        df["ttft"] = ttfts
+        df["generation_time"] = generation_times
         df["user_id"] = self.user_config.user_id
-        df["question_id"] = range(1, len(self.prompt_lengths) + 1)
-        df["launch_time"] = self.launch_times
-        df["finish_time"] = self.finish_times
+        df["question_id"] = range(1, min_length + 1)
+        df["launch_time"] = launch_times
+        df["finish_time"] = finish_times
         return df
 
 
