@@ -282,9 +282,7 @@ class KvawareRouter(RoutingInterface):
         self.tokenizer_name = tokenizer_name
         self.tokenizer = None
         self.threshold = kv_aware_threshold
-        # 添加性能監控變量
-        self.count = 0
-        self.csv_file_path = "/home/w00917303/test_result.csv"
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     def start_kv_manager(self):
         """
@@ -297,24 +295,7 @@ class KvawareRouter(RoutingInterface):
         if self.tokenizer_name is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
 
-    def _save_to_csv(self, timing_data):
-        """
-        保存性能數據到 CSV 文件
-        """
-        try:
-            os.makedirs(os.path.dirname(self.csv_file_path), exist_ok=True)
-            
-            with open(self.csv_file_path, 'a', newline='', encoding='utf-8') as csvfile:
-                if self.count == 101:  # 第一次寫入標題
-                    csvfile.write('count,total_time,tokenize_time,lookup_time,hash_routing_time,instance_mapping_time,find_best_matched_time,find_best_ttft_time,fallback_time\n')
-                
-                csvfile.write(f"{timing_data['count']},{timing_data['total_time']:.6f},"
-                            f"{timing_data['tokenize_time']:.6f},{timing_data['lookup_time']:.6f},"
-                            f"{timing_data['hash_routing_time']:.6f},{timing_data['instance_mapping_time']:.6f},"
-                            f"{timing_data['find_best_matched_time']:.6f},{timing_data['find_best_ttft_time']:.6f},"
-                            f"{timing_data['fallback_time']:.6f}\n")
-        except Exception as e:
-            logger.error(f"Failed to save performance data: {e}")
+    # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
     def query_manager(self, msg) -> str:
         """
@@ -348,13 +329,11 @@ class KvawareRouter(RoutingInterface):
             longest prefix match)
         """
         # 開始性能監控
-        self.count += 1
         start_time = time.time()
         
         # 獲取全局時間追蹤監控器
         timing_monitor = get_request_timing_monitor()
         timing_data = {
-            'count': self.count,
             'total_time': 0,
             'tokenize_time': 0,
             'lookup_time': 0,
@@ -419,9 +398,7 @@ class KvawareRouter(RoutingInterface):
             # 計算總時間
             timing_data['total_time'] = time.time() - start_time
             
-            # 如果 count > 100，保存到 CSV
-            if self.count > 100:
-                self._save_to_csv(timing_data)
+            # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
             
             return url
         else:
@@ -450,9 +427,7 @@ class KvawareRouter(RoutingInterface):
             # 計算總時間
             timing_data['total_time'] = time.time() - start_time
             
-            # 如果 count > 100，保存到 CSV
-            if self.count > 100:
-                self._save_to_csv(timing_data)
+            # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
             
             return self.instance_id_to_url[queried_instance_ids[0]]
 
@@ -472,28 +447,7 @@ class PrefixAwareRouter(RoutingInterface):
 
         self.hashtrie = HashTrie()
         self._initialized = True
-        # 添加性能監控變量
-        self.count = 0
-        self.csv_file_path = "/home/w00917303/test_result.csv"
-
-    def _save_to_csv(self, timing_data):
-        """
-        保存性能數據到 CSV 文件
-        """
-        try:
-            os.makedirs(os.path.dirname(self.csv_file_path), exist_ok=True)
-            
-            with open(self.csv_file_path, 'a', newline='', encoding='utf-8') as csvfile:
-                if self.count == 101:  # 第一次寫入標題
-                    csvfile.write('count,total_time,tokenize_time,lookup_time,hash_routing_time,instance_mapping_time,find_best_matched_time,find_best_ttft_time,fallback_time\n')
-                
-                csvfile.write(f"{timing_data['count']},{timing_data['total_time']:.6f},"
-                            f"{timing_data['tokenize_time']:.6f},{timing_data['lookup_time']:.6f},"
-                            f"{timing_data['hash_routing_time']:.6f},{timing_data['instance_mapping_time']:.6f},"
-                            f"{timing_data['find_best_matched_time']:.6f},{timing_data['find_best_ttft_time']:.6f},"
-                            f"{timing_data['fallback_time']:.6f}\n")
-        except Exception as e:
-            logger.error(f"Failed to save performance data: {e}")
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     async def route_request(
         self,
@@ -520,10 +474,8 @@ class PrefixAwareRouter(RoutingInterface):
             longest prefix match)
         """
         # 開始性能監控
-        self.count += 1
         start_time = time.time()
         timing_data = {
-            'count': self.count,
             'total_time': 0,
             'tokenize_time': 0,
             'lookup_time': 0,
@@ -567,9 +519,7 @@ class PrefixAwareRouter(RoutingInterface):
         # 計算總時間
         timing_data['total_time'] = time.time() - start_time
         
-        # 如果 count > 100，保存到 CSV
-        if self.count > 100:
-            self._save_to_csv(timing_data)
+        # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
 
         return selected_endpoint
 
@@ -644,9 +594,7 @@ class TtftRouter(RoutingInterface):
         self.tokenizer_name = tokenizer_name
         self.tokenizer = None
         self.uncached_prefix_tokens = None
-        # 添加性能監控變量
-        self.count = 0
-        self.csv_file_path = "/home/w00917303/test_result.csv"
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     def start_kv_manager(self):
         """
@@ -659,23 +607,7 @@ class TtftRouter(RoutingInterface):
         if self.tokenizer_name is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
 
-    def _save_to_csv(self, timing_data):
-        """
-        保存性能數據到 CSV 文件
-        """
-        try:
-            os.makedirs(os.path.dirname(self.csv_file_path), exist_ok=True)
-            
-            with open(self.csv_file_path, 'a', newline='', encoding='utf-8') as csvfile:
-                if self.count == 101:  # 第一次寫入標題
-                    csvfile.write('count,total_time,tokenize_time,lookup_time,find_best_matched_time,find_best_ttft_time,fallback_time\n')
-                
-                csvfile.write(f"{timing_data['count']},{timing_data['total_time']:.6f},"
-                            f"{timing_data['tokenize_time']:.6f},{timing_data['lookup_time']:.6f},"
-                            f"{timing_data['find_best_matched_time']:.6f},{timing_data['find_best_ttft_time']:.6f},"
-                            f"{timing_data['fallback_time']:.6f}\n")
-        except Exception as e:
-            logger.error(f"Failed to save performance data: {e}")
+    # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
     async def route_request(
         self,
@@ -702,13 +634,11 @@ class TtftRouter(RoutingInterface):
             longest prefix match)
         """
         # 開始性能監控
-        self.count += 1
         start_time = time.time()
         
         # 獲取全局時間追蹤監控器
         timing_monitor = get_request_timing_monitor()
         timing_data = {
-            'count': self.count,
             'total_time': 0,
             'tokenize_time': 0,
             'lookup_time': 0,
@@ -779,9 +709,7 @@ class TtftRouter(RoutingInterface):
                 if request_timing_data:
                     timing_monitor.update_router_timing(request_timing_data, timing_data)
                 
-                # 如果 count > 100，保存到 CSV
-                if self.count > 100:
-                    self._save_to_csv(timing_data)
+                # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
                 
                 return best_ttft_url
         except ValueError:
@@ -802,9 +730,7 @@ class TtftRouter(RoutingInterface):
         if request_timing_data:
             timing_monitor.update_router_timing(request_timing_data, timing_data)
         
-        # 如果 count > 100，保存到 CSV
-        if self.count > 100:
-            self._save_to_csv(timing_data)
+        # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
         
         return result
 

@@ -203,14 +203,15 @@ class RequestTimingMonitor:
             start_dt = datetime.fromisoformat(timing_data.start_timestamp)
             end_dt = datetime.fromisoformat(timing_data.end_timestamp)
             timing_data.total_request_time = (end_dt - start_dt).total_seconds()
-        # 設定 TTFT（已經是相對耗時）
+        # 設定 TTFT（從請求開始到第一個 token 的時間）
         if timing_data.first_token_time and timing_data.first_token_time > 0:
             timing_data.ttft = timing_data.first_token_time
         
-        # 設定 decode_time（以最後 token − 首個 token；若缺資料則用流式相對時間差）
+        # 設定 decode_time（從第一個 token 到最後一個 token 的時間）
         if timing_data.last_token_time and timing_data.first_token_time and timing_data.last_token_time > timing_data.first_token_time:
             timing_data.decode_time = timing_data.last_token_time - timing_data.first_token_time
         elif timing_data.response_streaming_time and timing_data.first_token_time:
+            # 如果沒有 last_token_time，用 response_streaming_time 減去 first_token_time
             timing_data.decode_time = timing_data.response_streaming_time - timing_data.first_token_time
         
         # 保存到 CSV（完整 + 簡化）
@@ -222,8 +223,8 @@ class RequestTimingMonitor:
         with self.lock:
             self.count += 1
             
-            # 每 10 個請求保存一次，避免頻繁寫入
-            if self.count % 10 == 0 or self.count <= 10:
+            # 每 100 個請求保存一次，避免頻繁寫入
+            if self.count % 100 == 0 or self.count <= 100:
                 with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(asdict(timing_data).values())
@@ -231,43 +232,45 @@ class RequestTimingMonitor:
     def _save_simple_csv(self, timing_data: RequestTimingData):
         """保存簡化時間數據到簡化 CSV 文件"""
         with self.lock:
-            # 若檔案存在但為空（或剛被清空），先寫入表頭
-            need_header = (not os.path.exists(self.simple_csv_file)) or (os.path.getsize(self.simple_csv_file) == 0)
-            with open(self.simple_csv_file, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                if need_header:
+            # 每 100 個請求保存一次，避免頻繁寫入
+            if self.count % 100 == 0 or self.count <= 100:
+                # 若檔案存在但為空（或剛被清空），先寫入表頭
+                need_header = (not os.path.exists(self.simple_csv_file)) or (os.path.getsize(self.simple_csv_file) == 0)
+                with open(self.simple_csv_file, 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    if need_header:
+                        writer.writerow([
+                            "request_id",
+                            "endpoint",
+                            "routing_logic",
+                            "total_request_time",
+                            "ttft",
+                            "decode_time",
+                            "routing_decision_time",
+                            "backend_connection_time",
+                            "lookup_time",
+                            "matched_kvcache_tokens",
+                            "request_tokens",
+                            "status_code",
+                            "start_timestamp",
+                            "end_timestamp",
+                        ])
                     writer.writerow([
-                        "request_id",
-                        "endpoint",
-                        "routing_logic",
-                        "total_request_time",
-                        "ttft",
-                        "decode_time",
-                        "routing_decision_time",
-                        "backend_connection_time",
-                        "lookup_time",
-                        "matched_kvcache_tokens",
-                        "request_tokens",
-                        "status_code",
-                        "start_timestamp",
-                        "end_timestamp",
+                        timing_data.request_id,
+                        timing_data.endpoint,
+                        timing_data.routing_logic,
+                        f"{timing_data.total_request_time:.6f}",
+                        f"{timing_data.ttft:.6f}",
+                        f"{timing_data.decode_time:.6f}",
+                        f"{timing_data.routing_decision_time:.6f}",
+                        f"{timing_data.backend_connection_time:.6f}",
+                        f"{timing_data.lookup_time:.6f}",
+                        timing_data.matched_kvcache_tokens,
+                        timing_data.request_tokens,
+                        timing_data.status_code,
+                        timing_data.start_timestamp,
+                        timing_data.end_timestamp,
                     ])
-                writer.writerow([
-                    timing_data.request_id,
-                    timing_data.endpoint,
-                    timing_data.routing_logic,
-                    f"{timing_data.total_request_time:.6f}",
-                    f"{timing_data.ttft:.6f}",
-                    f"{timing_data.decode_time:.6f}",
-                    f"{timing_data.routing_decision_time:.6f}",
-                    f"{timing_data.backend_connection_time:.6f}",
-                    f"{timing_data.lookup_time:.6f}",
-                    timing_data.matched_kvcache_tokens,
-                    timing_data.request_tokens,
-                    timing_data.status_code,
-                    timing_data.start_timestamp,
-                    timing_data.end_timestamp,
-                ])
     
     def get_stats(self) -> Dict[str, float]:
         """獲取統計信息"""
