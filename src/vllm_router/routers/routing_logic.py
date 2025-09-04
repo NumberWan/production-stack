@@ -668,8 +668,8 @@ class TtftRouter(RoutingInterface):
             if request_stats is None:
                 raise ValueError("no request stats was provided")
             # 僅計 FullLookupMsg 的用時
-            msg = FullLookupMsg(event_id="", tokens=token_ids)
             full_lookup_start = time.time()
+            msg = FullLookupMsg(event_id="", tokens=token_ids)
             ret_msg = await self.kv_manager.handle_orchestration_message(msg)
             matched_infos = ret_msg.matched_info
             timing_data['lookup_time'] = time.time() - full_lookup_start
