@@ -214,6 +214,13 @@ class RequestTimingMonitor:
             # 如果沒有 last_token_time，用 response_streaming_time 減去 first_token_time
             timing_data.decode_time = timing_data.response_streaming_time - timing_data.first_token_time
         
+        # 驗證時間邏輯：ttft + decode_time + routing_decision_time 應該 <= total_request_time
+        # 如果超過，調整 decode_time 以確保邏輯正確
+        if timing_data.ttft > 0 and timing_data.decode_time > 0:
+            max_decode_time = timing_data.total_request_time - timing_data.ttft - timing_data.routing_decision_time
+            if timing_data.decode_time > max_decode_time and max_decode_time > 0:
+                timing_data.decode_time = max_decode_time
+        
         # 保存到 CSV（完整 + 簡化）
         self._save_to_csv(timing_data)
         self._save_simple_csv(timing_data)
