@@ -238,7 +238,7 @@ class RequestTimingMonitor:
                 need_header = (not os.path.exists(self.simple_csv_file)) or (os.path.getsize(self.simple_csv_file) == 0)
                 with open(self.simple_csv_file, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                                    if need_header:
+                    if need_header:
                     writer.writerow([
                         "request_id",
                         "endpoint",
