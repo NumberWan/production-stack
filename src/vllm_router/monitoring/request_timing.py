@@ -238,23 +238,29 @@ class RequestTimingMonitor:
                 need_header = (not os.path.exists(self.simple_csv_file)) or (os.path.getsize(self.simple_csv_file) == 0)
                 with open(self.simple_csv_file, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    if need_header:
-                        writer.writerow([
-                            "request_id",
-                            "endpoint",
-                            "routing_logic",
-                            "total_request_time",
-                            "ttft",
-                            "decode_time",
-                            "routing_decision_time",
-                            "backend_connection_time",
-                            "lookup_time",
-                            "matched_kvcache_tokens",
-                            "request_tokens",
-                            "status_code",
-                            "start_timestamp",
-                            "end_timestamp",
-                        ])
+                                    if need_header:
+                    writer.writerow([
+                        "request_id",
+                        "endpoint",
+                        "routing_logic",
+                        "total_request_time",
+                        "ttft",
+                        "decode_time",
+                        "routing_decision_time",
+                        "backend_connection_time",
+                        "lookup_time",
+                        "tokenize_time",
+                        "hash_routing_time",
+                        "instance_mapping_time",
+                        "find_best_matched_time",
+                        "find_best_ttft_time",
+                        "fallback_time",
+                        "matched_kvcache_tokens",
+                        "request_tokens",
+                        "status_code",
+                        "start_timestamp",
+                        "end_timestamp",
+                    ])
                     writer.writerow([
                         timing_data.request_id,
                         timing_data.endpoint,
@@ -265,6 +271,12 @@ class RequestTimingMonitor:
                         f"{timing_data.routing_decision_time:.6f}",
                         f"{timing_data.backend_connection_time:.6f}",
                         f"{timing_data.lookup_time:.6f}",
+                        f"{timing_data.tokenize_time:.6f}",
+                        f"{timing_data.hash_routing_time:.6f}",
+                        f"{timing_data.instance_mapping_time:.6f}",
+                        f"{timing_data.find_best_matched_time:.6f}",
+                        f"{timing_data.find_best_ttft_time:.6f}",
+                        f"{timing_data.fallback_time:.6f}",
                         timing_data.matched_kvcache_tokens,
                         timing_data.request_tokens,
                         timing_data.status_code,

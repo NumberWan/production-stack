@@ -398,7 +398,10 @@ class KvawareRouter(RoutingInterface):
             # 計算總時間
             timing_data['total_time'] = time.time() - start_time
             
-            # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
+            # 更新全局時間追蹤
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data:
+                timing_monitor.update_router_timing(request_timing_data, timing_data)
             
             return url
         else:
@@ -427,7 +430,10 @@ class KvawareRouter(RoutingInterface):
             # 計算總時間
             timing_data['total_time'] = time.time() - start_time
             
-            # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
+            # 更新全局時間追蹤
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data:
+                timing_monitor.update_router_timing(request_timing_data, timing_data)
             
             return self.instance_id_to_url[queried_instance_ids[0]]
 
