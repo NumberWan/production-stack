@@ -52,6 +52,16 @@ class RequestTimingData:
     matched_kvcache_tokens: int = 0
     request_tokens: int = 0
     
+    # KV Cache 傳輸時間指標
+    kv_cache_transfer_time: float = 0.0
+    kv_cache_transfer_type: str = ""
+    kv_cache_transfer_size_bytes: int = 0
+    kv_cache_transfer_throughput_gbps: float = 0.0
+    kv_cache_transfer_count: int = 0
+    kv_cache_lookup_time: float = 0.0
+    kv_cache_hit: bool = False
+    kv_cache_miss: bool = False
+    
     # 路由器特定時間 (如果適用)
     tokenize_time: float = 0.0
     lookup_time: float = 0.0
@@ -190,6 +200,24 @@ class RequestTimingMonitor:
             if hasattr(timing_data, key):
                 setattr(timing_data, key, value)
     
+    def record_kv_cache_transfer(self, timing_data: RequestTimingData, 
+                                transfer_time: float, transfer_type: str = "unknown",
+                                transfer_size_bytes: int = 0, throughput_gbps: float = 0.0):
+        """記錄 KV cache 傳輸時間"""
+        timing_data.kv_cache_transfer_time += transfer_time
+        timing_data.kv_cache_transfer_type = transfer_type
+        timing_data.kv_cache_transfer_size_bytes += transfer_size_bytes
+        timing_data.kv_cache_transfer_count += 1
+        if throughput_gbps > 0:
+            timing_data.kv_cache_transfer_throughput_gbps = throughput_gbps
+    
+    def record_kv_cache_lookup(self, timing_data: RequestTimingData, 
+                              lookup_time: float, hit: bool = False):
+        """記錄 KV cache 查找時間"""
+        timing_data.kv_cache_lookup_time = lookup_time
+        timing_data.kv_cache_hit = hit
+        timing_data.kv_cache_miss = not hit
+    
     def complete_request(self, timing_data: RequestTimingData, server_url: str = "", 
                         status_code: int = 200, error_message: str = None):
         """完成請求追蹤並保存數據"""
@@ -262,6 +290,14 @@ class RequestTimingMonitor:
                         "fallback_time",
                         "matched_kvcache_tokens",
                         "request_tokens",
+                        "kv_cache_transfer_time",
+                        "kv_cache_transfer_type",
+                        "kv_cache_transfer_size_bytes",
+                        "kv_cache_transfer_throughput_gbps",
+                        "kv_cache_transfer_count",
+                        "kv_cache_lookup_time",
+                        "kv_cache_hit",
+                        "kv_cache_miss",
                         "status_code",
                         "start_timestamp",
                         "end_timestamp",
@@ -284,6 +320,14 @@ class RequestTimingMonitor:
                     f"{timing_data.fallback_time:.10f}",
                     timing_data.matched_kvcache_tokens,
                     timing_data.request_tokens,
+                    f"{timing_data.kv_cache_transfer_time:.10f}",
+                    timing_data.kv_cache_transfer_type,
+                    timing_data.kv_cache_transfer_size_bytes,
+                    f"{timing_data.kv_cache_transfer_throughput_gbps:.10f}",
+                    timing_data.kv_cache_transfer_count,
+                    f"{timing_data.kv_cache_lookup_time:.10f}",
+                    timing_data.kv_cache_hit,
+                    timing_data.kv_cache_miss,
                     timing_data.status_code,
                     timing_data.start_timestamp,
                     timing_data.end_timestamp,

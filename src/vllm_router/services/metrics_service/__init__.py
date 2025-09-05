@@ -45,3 +45,25 @@ avg_itl = Gauge("vllm:avg_itl", "Average Inter-Token Latency", ["server"])
 num_requests_swapped = Gauge(
     "vllm:num_requests_swapped", "Number of swapped requests", ["server"]
 )
+
+# KV Cache Transfer Metrics
+kv_cache_transfer_time = Gauge(
+    "vllm:kv_cache_transfer_time_ms", 
+    "Time spent transferring KV cache between instances in milliseconds", 
+    ["server", "transfer_type"]
+)
+kv_cache_transfer_count = Gauge(
+    "vllm:kv_cache_transfer_count_total", 
+    "Total number of KV cache transfers", 
+    ["server", "transfer_type"]
+)
+kv_cache_transfer_throughput = Gauge(
+    "vllm:kv_cache_transfer_throughput_gbps", 
+    "KV cache transfer throughput in GB/s", 
+    ["server", "transfer_type"]
+)
+kv_cache_transfer_size = Gauge(
+    "vllm:kv_cache_transfer_size_bytes", 
+    "Size of KV cache transfers in bytes", 
+    ["server", "transfer_type"]
+)

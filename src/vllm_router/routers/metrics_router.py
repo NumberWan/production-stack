@@ -28,6 +28,10 @@ from vllm_router.services.metrics_service import (
     gpu_prefix_cache_hits_total,
     gpu_prefix_cache_queries_total,
     healthy_pods_total,
+    kv_cache_transfer_time,
+    kv_cache_transfer_count,
+    kv_cache_transfer_throughput,
+    kv_cache_transfer_size,
     num_decoding_requests,
     num_prefill_requests,
     num_requests_running,
@@ -35,6 +39,7 @@ from vllm_router.services.metrics_service import (
 )
 from vllm_router.stats.engine_stats import get_engine_stats_scraper
 from vllm_router.stats.request_stats import get_request_stats_monitor
+from vllm_router.services.kv_transfer_monitor import get_kv_transfer_monitor
 
 metrics_router = APIRouter()
 
@@ -118,6 +123,10 @@ async def metrics():
         healthy_pods_total.labels(server=ep.url).set(
             1 if getattr(ep, "healthy", True) else 0
         )
+        
+        # Update KV cache transfer metrics
+        kv_transfer_monitor = get_kv_transfer_monitor()
+        kv_transfer_monitor.update_prometheus_metrics(server=ep.url)
 
     # Return all metrics in Prometheus format
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
