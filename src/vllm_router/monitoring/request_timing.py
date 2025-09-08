@@ -58,6 +58,8 @@ class RequestTimingData:
     kv_cache_transfer_size_bytes: int = 0
     kv_cache_transfer_throughput_gbps: float = 0.0
     kv_cache_transfer_count: int = 0
+    # 以 token 為單位的轉移量（若可得）
+    kv_cache_transfer_tokens: int = 0
     kv_cache_lookup_time: float = 0.0
     kv_cache_hit: bool = False
     kv_cache_miss: bool = False
@@ -127,8 +129,22 @@ class RequestTimingMonitor:
                     "routing_decision_time",
                     "backend_connection_time",
                     "lookup_time",
+                    "tokenize_time",
+                    "hash_routing_time",
+                    "instance_mapping_time",
+                    "find_best_matched_time",
+                    "find_best_ttft_time",
+                    "fallback_time",
                     "matched_kvcache_tokens",
                     "request_tokens",
+                    "kv_cache_transfer_time",
+                    "kv_cache_transfer_type",
+                    "kv_cache_transfer_size_bytes",
+                    "kv_cache_transfer_throughput_gbps",
+                    "kv_cache_transfer_count",
+                    "kv_cache_lookup_time",
+                    "kv_cache_hit",
+                    "kv_cache_miss",
                     "status_code",
                     "start_timestamp",
                     "end_timestamp",
@@ -267,7 +283,7 @@ class RequestTimingMonitor:
         """保存簡化時間數據到簡化 CSV 文件"""
         with self.lock:
             # 每個請求都保存
-            # 若檔案存在但為空（或剛被清空），先寫入表頭
+            # 若檔案存在但為空（或剛被清空），先寫入表頭（完整簡化版）
             need_header = (not os.path.exists(self.simple_csv_file)) or (os.path.getsize(self.simple_csv_file) == 0)
             with open(self.simple_csv_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -293,6 +309,7 @@ class RequestTimingMonitor:
                         "kv_cache_transfer_time",
                         "kv_cache_transfer_type",
                         "kv_cache_transfer_size_bytes",
+                        "kv_cache_transfer_tokens",
                         "kv_cache_transfer_throughput_gbps",
                         "kv_cache_transfer_count",
                         "kv_cache_lookup_time",
@@ -311,7 +328,7 @@ class RequestTimingMonitor:
                     f"{timing_data.decode_time:.10f}",
                     f"{timing_data.routing_decision_time:.10f}",
                     f"{timing_data.backend_connection_time:.10f}",
-                    f"{timing_data.lookup_time:.10f}",
+                    f"{timing_data.lookup_time:.10f}", 
                     f"{timing_data.tokenize_time:.10f}",
                     f"{timing_data.hash_routing_time:.10f}",
                     f"{timing_data.instance_mapping_time:.10f}",
@@ -323,6 +340,7 @@ class RequestTimingMonitor:
                     f"{timing_data.kv_cache_transfer_time:.10f}",
                     timing_data.kv_cache_transfer_type,
                     timing_data.kv_cache_transfer_size_bytes,
+                    timing_data.kv_cache_transfer_tokens,
                     f"{timing_data.kv_cache_transfer_throughput_gbps:.10f}",
                     timing_data.kv_cache_transfer_count,
                     f"{timing_data.kv_cache_lookup_time:.10f}",

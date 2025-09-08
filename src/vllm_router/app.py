@@ -226,6 +226,9 @@ def initialize_all(app: FastAPI, args):
                                                      args.static_backends),
     )
 
+    # Expose lmcache controller port to app state for non-intrusive lookups in RR
+    app.state.lmcache_controller_port = args.lmcache_controller_port
+
     # Initialize feature gates
     initialize_feature_gates(args.feature_gates)
     # Check if the SemanticCache feature gate is enabled
