@@ -414,12 +414,11 @@ class UserSessionManager:
         logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
 
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
-        for i in range(self.workload_config.num_users):
+        # 修正：不要一次性創建所有用戶，而是按照 QPS 限制逐步創建
+        # 只創建第一個用戶，其他用戶會在後續的 step 中逐步加入
+        if len(self.sessions) == 0:
             new_session = self._create_user_session()
-            offset = ramp_up_time - i * self.gap_between_users
-            if offset < 0:
-                break
-            new_session.set_internal_state(offset, timestamp)
+            new_session.set_internal_state(0, timestamp)  # 第一個用戶立即開始
         self.need_ramp_up = False
 
     def _create_user_session(self):
@@ -459,12 +458,14 @@ class UserSessionManager:
             #logger.info(f"unfinished queries >{self.workload_config.max_unfinished_queries}, waiting")
             return
 
-        if timestamp - self.last_user_join > self.gap_between_users:
+        # 修正：只有在未達到目標用戶數時才加入新用戶，並且按照 QPS 限制間隔加入
+        if (len(self.sessions) < self.workload_config.num_users and 
+            timestamp - self.last_user_join > self.gap_between_users):
             self._create_user_session()
             self.last_user_join = timestamp
             logger.info(
                 f"Joined a new user {self.user_id}, "
-                f"now active users: {len(self.sessions)}"
+                f"now active users: {len(self.sessions)}/{self.workload_config.num_users}"
             )
 
         for session in self.sessions:
