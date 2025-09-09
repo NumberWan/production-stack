@@ -338,7 +338,7 @@ async def route_general_request(
             endpoints, engine_stats, request_stats, request, request_json
         )
     elif isinstance(request.app.state.router, RoundRobinRouter):
-        server_url = await request.app.state.router.route_request(
+        server_url = request.app.state.router.route_request(
             endpoints, engine_stats, request_stats, request, request_json
         )
     else:
