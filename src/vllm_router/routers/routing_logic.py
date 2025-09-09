@@ -199,100 +199,46 @@ class RoundRobinRouter(RoutingInterface):
         chosen = self.sorted_endpoints[self.req_id % len(self.sorted_endpoints)]
         self.req_id += 1
 
-        # 執行非侵入式 LMCache lookup 用於監控（不影響路由決策）
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"RR route_request called with request_json: {request_json is not None}")
+        # 從 LMCache 獲取實際的 cache 統計資訊
         if request_json is not None:
-            await self._perform_lmcache_lookup(request, request_json, endpoints)
+            self._update_lmcache_stats(request, request_json)
 
         return chosen.url
 
-    async def _perform_lmcache_lookup(self, request: Request, request_json: Dict, endpoints: List[EndpointInfo]):
-        """執行 LMCache lookup 用於監控，重用 KvawareRouter 的邏輯"""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info("RR _perform_lmcache_lookup called")
-        
+    def _update_lmcache_stats(self, request: Request, request_json: Dict):
+        """從 LMCache 獲取實際的 cache 統計資訊"""
         try:
-            # 檢查是否有 LMCache controller port
-            lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
-            logger.info(f"RR lmcache_port: {lmcache_port}")
-            if lmcache_port is None:
-                logger.info("RR lmcache_port is None, skipping lookup")
-                return
-
             # 獲取 timing_data
             timing_data = getattr(request.state, 'timing_data', None)
-            logger.info(f"RR timing_data: {timing_data is not None}")
             if timing_data is None:
-                logger.info("RR timing_data is None, skipping lookup")
                 return
 
-            # 重用 KvawareRouter 的 lookup 邏輯
-            from lmcache.v1.cache_controller import controller_manager  # type: ignore
-            from lmcache.v1.cache_controller.message import LookupMsg  # type: ignore
-            from transformers import AutoTokenizer  # type: ignore
+            # 直接從 LMCache 的全局統計監控器獲取資訊
+            from lmcache.observability import LMCStatsMonitor
+            
+            # 獲取 LMCache 的統計資訊（不清空，只讀取）
+            stats_monitor = LMCStatsMonitor.GetOrCreate()
+            
+            # 使用統計資訊更新 timing_data
+            # 注意：這些是累積的統計資訊，不是單次請求的資訊
+            timing_data.matched_kvcache_tokens = stats_monitor.interval_lookup_hits
+            timing_data.request_tokens = stats_monitor.interval_lookup_tokens
+            timing_data.kv_cache_hit = stats_monitor.interval_lookup_hits > 0
+            timing_data.kv_cache_transfer_count = stats_monitor.interval_retrieve_requests
+            timing_data.kv_cache_transfer_tokens = stats_monitor.interval_hit_tokens
+            
+            # 記錄到監控系統
             from vllm_router.monitoring.request_timing import get_request_timing_monitor
-            import math
-            import time
-
-            # 步驟1: Tokenize（重用 KvawareRouter 邏輯）
-            tokenize_start = time.time()
-            if not hasattr(request.app.state, '_rr_tokenizer'):
-                request.app.state._rr_tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
-            tokenizer = request.app.state._rr_tokenizer
-            token_ids = tokenizer.encode(extract_prompt(request_json))
-            tokenize_time = time.time() - tokenize_start
-
-            # 步驟2: Lookup（重用 KvawareRouter 邏輯）
-            lookup_start = time.time()
-            if not hasattr(request.app.state, '_lmcache_manager'):
-                request.app.state._lmcache_manager = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
-            
-            kv_mgr = request.app.state._lmcache_manager
-            msg = LookupMsg(event_id="", tokens=token_ids)
-            # 使用與 KvawareRouter 相同的方法
-            instance_id = await kv_mgr.handle_orchestration_message(msg)
-            
-            matched_tokens = math.inf
-            logger.info(f"RR instance_id: {instance_id}")
-            if instance_id and hasattr(instance_id, 'layout_info') and instance_id.layout_info:
-                logger.info(f"RR layout_info: {instance_id.layout_info}")
-                if len(list(instance_id.layout_info.keys())) > 0:
-                    matched_instance_id = list(instance_id.layout_info.keys())[0]
-                    matched_tokens = instance_id.layout_info[matched_instance_id][1]
-                    logger.info(f"RR matched_tokens from layout_info: {matched_tokens}")
-            else:
-                logger.info("RR no layout_info or empty layout_info")
-            
-            lookup_time = time.time() - lookup_start
-
-            # 寫入到 timing_data（重用 KvawareRouter 邏輯）
-            timing_data.lookup_time = lookup_time
-            timing_data.matched_kvcache_tokens = int(matched_tokens if matched_tokens != math.inf else 0)
-            timing_data.request_tokens = int(len(token_ids))
-            
-            # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
-            uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens if matched_tokens != math.inf else 0))
-            if uncached_tokens > 0:
-                timing_data.kv_cache_transfer_count += 1
-                timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
-            
-            # 記錄 lookup 結果
             timing_monitor = get_request_timing_monitor()
             timing_monitor.record_kv_cache_lookup(
                 timing_data,
-                lookup_time=lookup_time,
-                hit=bool(matched_tokens != math.inf and matched_tokens > 0),
+                lookup_time=0.0,  # 從統計資訊獲取，不需要單次查詢時間
+                hit=timing_data.kv_cache_hit,
             )
-            
-            logger.info(f"RR lookup completed: tokens={len(token_ids)}, matched={matched_tokens if matched_tokens != math.inf else 0}, hit={bool(matched_tokens != math.inf and matched_tokens > 0)}")
-            
         except Exception as e:
-            # 記錄錯誤以便診斷
-            logger.info(f"RR LMCache lookup failed: {e}")
+            # 靜默處理錯誤，不影響路由功能
             pass
+
 
 
 class SessionRouter(RoutingInterface):
