@@ -327,9 +327,12 @@ async def route_general_request(
     
     # 為 Round Robin 路由執行非侵入式 LMCache lookup（在路由選擇前）
     if isinstance(request.app.state.router, RoundRobinRouter):
+        import logging
+        logging.getLogger(__name__).info("RR router detected, attempting LMCache lookup")
         try:
             # Only attempt when controller port is available
             lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
+            logging.getLogger(__name__).info(f"LMCache port: {lmcache_port}, timing_data: {timing_data is not None}")
             if lmcache_port is not None and timing_data is not None:
                 # Lazy import to avoid hard dependency
                 from lmcache.v1.cache_controller import controller_manager  # type: ignore
@@ -348,7 +351,7 @@ async def route_general_request(
                 except Exception as e:
                     # Debug: log the exception to understand why lookup fails
                     import logging
-                    logging.getLogger(__name__).debug(f"RR lookup failed to get tokens: {e}")
+                    logging.getLogger(__name__).info(f"RR lookup failed to get tokens: {e}")
                     token_ids = []
 
                 if token_ids:
@@ -387,7 +390,7 @@ async def route_general_request(
         except Exception as e:
             # Debug: log the exception to understand why lookup fails
             import logging
-            logging.getLogger(__name__).debug(f"RR lookup exception: {e}")
+            logging.getLogger(__name__).info(f"RR lookup exception: {e}")
             # Never break RR routing due to monitoring
             pass
     
