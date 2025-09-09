@@ -200,6 +200,9 @@ class RoundRobinRouter(RoutingInterface):
         self.req_id += 1
 
         # 執行非侵入式 LMCache lookup 用於監控（不影響路由決策）
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"RR route_request called with request_json: {request_json is not None}")
         if request_json is not None:
             self._perform_lmcache_lookup(request, request_json, endpoints)
 
@@ -207,15 +210,23 @@ class RoundRobinRouter(RoutingInterface):
 
     def _perform_lmcache_lookup(self, request: Request, request_json: Dict, endpoints: List[EndpointInfo]):
         """執行 LMCache lookup 用於監控，重用 KvawareRouter 的邏輯"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("RR _perform_lmcache_lookup called")
+        
         try:
             # 檢查是否有 LMCache controller port
             lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
+            logger.info(f"RR lmcache_port: {lmcache_port}")
             if lmcache_port is None:
+                logger.info("RR lmcache_port is None, skipping lookup")
                 return
 
             # 獲取 timing_data
             timing_data = getattr(request.state, 'timing_data', None)
+            logger.info(f"RR timing_data: {timing_data is not None}")
             if timing_data is None:
+                logger.info("RR timing_data is None, skipping lookup")
                 return
 
             # 重用 KvawareRouter 的 lookup 邏輯
@@ -269,10 +280,11 @@ class RoundRobinRouter(RoutingInterface):
                 hit=bool(matched_tokens != math.inf and matched_tokens > 0),
             )
             
+            logger.info(f"RR lookup completed: tokens={len(token_ids)}, matched={matched_tokens if matched_tokens != math.inf else 0}, hit={bool(matched_tokens != math.inf and matched_tokens > 0)}")
+            
         except Exception as e:
-            # 靜默處理錯誤，不影響路由
-            import logging
-            logging.getLogger(__name__).debug(f"RR LMCache lookup failed: {e}")
+            # 記錄錯誤以便診斷
+            logger.info(f"RR LMCache lookup failed: {e}")
             pass
 
 
