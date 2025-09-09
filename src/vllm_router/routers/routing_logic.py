@@ -168,7 +168,7 @@ class RoundRobinRouter(RoutingInterface):
         self.last_endpoints_hash = None
         self._initialized = True
 
-    def route_request(
+    async def route_request(
         self,
         endpoints: List[EndpointInfo],
         engine_stats: Dict[str, EngineStats],
@@ -204,11 +204,11 @@ class RoundRobinRouter(RoutingInterface):
         logger = logging.getLogger(__name__)
         logger.info(f"RR route_request called with request_json: {request_json is not None}")
         if request_json is not None:
-            self._perform_lmcache_lookup(request, request_json, endpoints)
+            await self._perform_lmcache_lookup(request, request_json, endpoints)
 
         return chosen.url
 
-    def _perform_lmcache_lookup(self, request: Request, request_json: Dict, endpoints: List[EndpointInfo]):
+    async def _perform_lmcache_lookup(self, request: Request, request_json: Dict, endpoints: List[EndpointInfo]):
         """執行 LMCache lookup 用於監控，重用 KvawareRouter 的邏輯"""
         import logging
         logger = logging.getLogger(__name__)
@@ -252,7 +252,8 @@ class RoundRobinRouter(RoutingInterface):
             
             kv_mgr = request.app.state._lmcache_manager
             msg = LookupMsg(event_id="", tokens=token_ids)
-            instance_id = kv_mgr.handle_orchestration_message(msg)
+            # 現在是異步環境，可以直接 await
+            instance_id = await kv_mgr.handle_orchestration_message(msg)
             
             matched_tokens = math.inf
             if instance_id and len(list(instance_id.layout_info.keys())) > 0:
