@@ -197,68 +197,7 @@ class RoundRobinRouter(RoutingInterface):
         chosen = self.sorted_endpoints[self.req_id % len(self.sorted_endpoints)]
         self.req_id += 1
 
-        # --- Non-intrusive LMCache lookup for monitoring (does not affect routing) ---
-        try:
-            # Only attempt when controller port is available
-            lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
-            if lmcache_port is not None:
-                # Lazy import to avoid hard dependency
-                from lmcache.v1.cache_controller import controller_manager  # type: ignore
-                from lmcache.v1.cache_controller.message import LookupMsg  # type: ignore
-                from transformers import AutoTokenizer  # type: ignore
-
-                # Build a minimal prompt from request body (best-effort)
-                try:
-                    body = request.scope.get('_body_cache')  # may be unavailable
-                    if body is None:
-                        # Re-read body (async path above already consumed; here we best-effort)
-                        # Skip if not accessible in this path
-                        token_ids = []
-                    else:
-                        import json as _json  # local import to avoid top deps
-                        req_json = _json.loads(body)
-                        prompt = extract_prompt(req_json)
-                        # Use first endpoint's model as tokenizer source
-                        tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
-                        token_ids = tokenizer.encode(prompt)
-                except Exception:
-                    token_ids = []
-
-                if token_ids:
-                    kv_mgr = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
-                    msg = LookupMsg(event_id="", tokens=token_ids)
-                    # This call is sync in KvawareRouter via await; here we provide a sync handle
-                    # The manager internally handles the orchestration; if it fails, we ignore.
-                    res = kv_mgr.handle_orchestration_message(msg)
-
-                    matched_tokens = 0
-                    try:
-                        if res and getattr(res, 'layout_info', None):
-                            # Pick max matched tokens across instances
-                            matched_tokens = max(v[1] for v in res.layout_info.values())
-                    except Exception:
-                        matched_tokens = 0
-
-                    # Write into timing data for CSV
-                    timing_monitor = get_request_timing_monitor()
-                    timing_data = getattr(request.state, 'timing_data', None)
-                    if timing_data is not None:
-                        timing_data.matched_kvcache_tokens = int(matched_tokens)
-                        timing_data.request_tokens = int(len(token_ids))
-                        # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
-                        uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens))
-                        if uncached_tokens > 0:
-                            timing_data.kv_cache_transfer_count += 1
-                            timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
-                        # We cannot precisely time lookup here; set to 0 if unknown
-                        timing_monitor.record_kv_cache_lookup(
-                            timing_data,
-                            lookup_time=0.0,
-                            hit=bool(matched_tokens > 0),
-                        )
-        except Exception:
-            # Never break RR routing due to monitoring
-            pass
+        # LMCache lookup is now handled in route_general_request before routing
 
         return chosen.url
 

@@ -323,6 +323,73 @@ async def route_general_request(
     
     # 記錄路由決策時間
     routing_decision_start = time.time()
+    
+    # 為 Round Robin 路由執行非侵入式 LMCache lookup（在路由選擇前）
+    if isinstance(request.app.state.router, RoundRobinRouter):
+        try:
+            # Only attempt when controller port is available
+            lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
+            if lmcache_port is not None and timing_data is not None:
+                # Lazy import to avoid hard dependency
+                from lmcache.v1.cache_controller import controller_manager  # type: ignore
+                from lmcache.v1.cache_controller.message import LookupMsg  # type: ignore
+                from transformers import AutoTokenizer  # type: ignore
+                from vllm_router.routers.routing_logic import extract_prompt
+
+                # Build a minimal prompt from request body
+                token_ids = []
+                try:
+                    prompt = extract_prompt(request_json)
+                    # Use first endpoint's model as tokenizer source
+                    if endpoints and endpoints[0].model_names:
+                        tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
+                        token_ids = tokenizer.encode(prompt)
+                except Exception as e:
+                    # Debug: log the exception to understand why lookup fails
+                    import logging
+                    logging.getLogger(__name__).debug(f"RR lookup failed to get tokens: {e}")
+                    token_ids = []
+
+                if token_ids:
+                    kv_mgr = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
+                    msg = LookupMsg(event_id="", tokens=token_ids)
+                    # This call is sync in KvawareRouter via await; here we provide a sync handle
+                    # The manager internally handles the orchestration; if it fails, we ignore.
+                    res = kv_mgr.handle_orchestration_message(msg)
+
+                    matched_tokens = 0
+                    try:
+                        if res and getattr(res, 'layout_info', None):
+                            # Pick max matched tokens across instances
+                            matched_tokens = max(v[1] for v in res.layout_info.values())
+                    except Exception:
+                        matched_tokens = 0
+
+                    # Write into timing data for CSV
+                    timing_data.matched_kvcache_tokens = int(matched_tokens)
+                    timing_data.request_tokens = int(len(token_ids))
+                    # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
+                    uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens))
+                    if uncached_tokens > 0:
+                        timing_data.kv_cache_transfer_count += 1
+                        timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
+                    # We cannot precisely time lookup here; set to 0 if unknown
+                    timing_monitor.record_kv_cache_lookup(
+                        timing_data,
+                        lookup_time=0.0,
+                        hit=bool(matched_tokens > 0),
+                    )
+                    
+                    # Debug: log the values being set
+                    import logging
+                    logging.getLogger(__name__).info(f"RR lookup: tokens={len(token_ids)}, matched={matched_tokens}, hit={bool(matched_tokens > 0)}")
+        except Exception as e:
+            # Debug: log the exception to understand why lookup fails
+            import logging
+            logging.getLogger(__name__).debug(f"RR lookup exception: {e}")
+            # Never break RR routing due to monitoring
+            pass
+    
     if request_endpoint:
         server_url = endpoints[0].url
         logger.debug(
