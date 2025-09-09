@@ -48,7 +48,7 @@ logger = init_logger(__name__)
 async def route_chat_completion(request: Request, background_tasks: BackgroundTasks):
     # 開始請求時間追蹤
     timing_monitor = get_request_timing_monitor()
-    request_id = request.headers.get("X-Request-Id") or f"chat_{int(time.time() * 1000)}"
+    request_id = request.headers.get("X-Request-Id") or f"{int(time.time() * 1000)}"
     
     # 獲取請求體以提取模型信息
     request_body = await request.body()
@@ -97,7 +97,7 @@ async def route_chat_completion(request: Request, background_tasks: BackgroundTa
 async def route_completion(request: Request, background_tasks: BackgroundTasks):
     # 開始請求時間追蹤
     timing_monitor = get_request_timing_monitor()
-    request_id = request.headers.get("X-Request-Id") or f"completion_{int(time.time() * 1000)}"
+    request_id = request.headers.get("X-Request-Id") or f"{int(time.time() * 1000)}"
     
     # 獲取請求體以提取模型信息
     request_body = await request.body()

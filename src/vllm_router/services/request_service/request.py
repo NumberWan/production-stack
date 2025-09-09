@@ -215,8 +215,8 @@ async def route_general_request(
         return response
     
     in_router_time = time.time()
-    # Same as vllm, Get request_id from X-Request-Id header if available
-    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    # Use request_id from main_router if available, otherwise generate new one
+    request_id = getattr(request.state, 'request_id', None) or request.headers.get("X-Request-Id") or str(uuid.uuid4())
     
     # 記錄請求解析開始時間
     request_parsing_start = time.time()
@@ -457,8 +457,8 @@ async def route_disaggregated_prefill_request(
     background_tasks: BackgroundTasks,
 ):
     in_router_time = time.time()
-    # Same as vllm, Get request_id from X-Request-Id header if available
-    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    # Use request_id from main_router if available, otherwise generate new one
+    request_id = getattr(request.state, 'request_id', None) or request.headers.get("X-Request-Id") or str(uuid.uuid4())
     request_json = await request.json()
 
     orig_max_tokens = request_json.get("max_tokens", 0)
@@ -552,8 +552,8 @@ async def route_sleep_wakeup_request(
     background_tasks: BackgroundTasks,
 ):
     in_router_time = time.time()
-    # Same as vllm, Get request_id from X-Request-Id header if available
-    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    # Use request_id from main_router if available, otherwise generate new one
+    request_id = getattr(request.state, 'request_id', None) or request.headers.get("X-Request-Id") or str(uuid.uuid4())
 
     if request.query_params:
         request_endpoint = request.query_params.get("id")
