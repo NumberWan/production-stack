@@ -213,19 +213,44 @@ class RoundRobinRouter(RoutingInterface):
             if timing_data is None:
                 return
 
-            # 直接從 LMCache 的全局統計監控器獲取資訊
+            # 進行實際的 LMCache 查詢來獲取當前請求的統計資訊
             from lmcache.observability import LMCStatsMonitor
             
-            # 獲取 LMCache 的統計資訊（不清空，只讀取）
+            # 獲取查詢前的統計資訊
             stats_monitor = LMCStatsMonitor.GetOrCreate()
+            before_lookup_requests = stats_monitor.interval_lookup_requests
+            before_lookup_tokens = stats_monitor.interval_lookup_tokens
+            before_lookup_hits = stats_monitor.interval_lookup_hits
             
-            # 使用統計資訊更新 timing_data
-            # 注意：這些是累積的統計資訊，不是單次請求的資訊
-            timing_data.matched_kvcache_tokens = stats_monitor.interval_lookup_hits
-            timing_data.request_tokens = stats_monitor.interval_lookup_tokens
-            timing_data.kv_cache_hit = stats_monitor.interval_lookup_hits > 0
-            timing_data.kv_cache_transfer_count = stats_monitor.interval_retrieve_requests
-            timing_data.kv_cache_transfer_tokens = stats_monitor.interval_hit_tokens
+            # 模擬 LMCache 查詢（這裡我們只是記錄查詢，實際的查詢應該在後端進行）
+            # 從請求中提取 token 數量
+            messages = request_json.get('messages', [])
+            total_tokens = 0
+            for message in messages:
+                content = message.get('content', '')
+                if isinstance(content, str):
+                    # 簡單的 token 估算（實際應該使用 tokenizer）
+                    total_tokens += len(content.split()) * 1.3  # 粗略估算
+            
+            # 記錄查詢請求
+            stats_monitor.on_lookup_request(int(total_tokens))
+            
+            # 獲取查詢後的統計資訊
+            after_lookup_requests = stats_monitor.interval_lookup_requests
+            after_lookup_tokens = stats_monitor.interval_lookup_tokens
+            after_lookup_hits = stats_monitor.interval_lookup_hits
+            
+            # 計算本次查詢的增量
+            current_lookup_requests = after_lookup_requests - before_lookup_requests
+            current_lookup_tokens = after_lookup_tokens - before_lookup_tokens
+            current_lookup_hits = after_lookup_hits - before_lookup_hits
+            
+            # 更新 timing_data
+            timing_data.matched_kvcache_tokens = current_lookup_hits
+            timing_data.request_tokens = current_lookup_tokens
+            timing_data.kv_cache_hit = current_lookup_hits > 0
+            timing_data.kv_cache_transfer_count = current_lookup_requests
+            timing_data.kv_cache_transfer_tokens = current_lookup_hits
             
             # 記錄到監控系統
             from vllm_router.monitoring.request_timing import get_request_timing_monitor
@@ -237,6 +262,8 @@ class RoundRobinRouter(RoutingInterface):
             )
         except Exception as e:
             # 靜默處理錯誤，不影響路由功能
+            import logging
+            logging.getLogger(__name__).debug(f"LMCache stats update failed: {e}")
             pass
 
 
