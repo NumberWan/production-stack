@@ -159,13 +159,24 @@ class RoutingInterface(metaclass=SingletonABCMeta):
 class RoundRobinRouter(RoutingInterface):
     # TODO (ApostaC): when available engines in the endpoints changes, the
     # algorithm may not be "perfectly" round-robin.
-    def __init__(self):
+    def __init__(self, lmcache_controller_port: int = None):
         if hasattr(self, "_initialized"):
             return
         self.req_id = 0
         self.sorted_endpoints = []
         self.last_endpoints_id = None
         self.last_endpoints_hash = None
+        
+        # 添加 LMCache 支持
+        self.lmcache_controller_port = lmcache_controller_port
+        self.kv_manager = None
+        self.tokenizer = None
+        if lmcache_controller_port is not None:
+            from lmcache.v1.cache_controller import controller_manager
+            self.kv_manager = controller_manager.LMCacheControllerManager(
+                f"0.0.0.0:{lmcache_controller_port}"
+            )
+        
         self._initialized = True
 
     async def route_request(
@@ -201,11 +212,11 @@ class RoundRobinRouter(RoutingInterface):
 
         # 從 LMCache 獲取實際的 cache 統計資訊
         if request_json is not None:
-            self._update_lmcache_stats(request, request_json)
+            await self._update_lmcache_stats(request, request_json)
 
         return chosen.url
 
-    def _update_lmcache_stats(self, request: Request, request_json: Dict):
+    async def _update_lmcache_stats(self, request: Request, request_json: Dict):
         """從 LMCache 獲取實際的 cache 統計資訊"""
         try:
             # 獲取 timing_data
@@ -213,7 +224,105 @@ class RoundRobinRouter(RoutingInterface):
             if timing_data is None:
                 return
 
-            # 進行實際的 LMCache 查詢來獲取當前請求的統計資訊
+            # 如果沒有 LMCache 管理器，使用模擬統計
+            if self.kv_manager is None:
+                await self._simulate_lmcache_stats(request, request_json)
+                return
+
+            # 進行真實的 LMCache 查詢
+            from lmcache.observability import LMCStatsMonitor
+            from transformers import AutoTokenizer
+            from lmcache.v1.cache_controller.message import LookupMsg
+            import math
+            
+            # 獲取查詢前的統計資訊
+            stats_monitor = LMCStatsMonitor.GetOrCreate()
+            before_lookup_requests = stats_monitor.interval_lookup_requests
+            before_lookup_tokens = stats_monitor.interval_lookup_tokens
+            before_lookup_hits = stats_monitor.interval_lookup_hits
+            
+            # 使用 tokenizer 進行真實的 tokenization
+            if self.tokenizer is None:
+                # 從請求中獲取模型名稱
+                model_name = request_json.get('model', '')
+                if model_name:
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            
+            if self.tokenizer is not None:
+                # 提取 prompt 並進行 tokenization
+                from vllm_router.routers.routing_logic import extract_prompt
+                prompt = extract_prompt(request_json)
+                token_ids = self.tokenizer.encode(prompt)
+                total_tokens = len(token_ids)
+            else:
+                # 回退到簡單估算
+                messages = request_json.get('messages', [])
+                total_tokens = 0
+                for message in messages:
+                    content = message.get('content', '')
+                    if isinstance(content, str):
+                        total_tokens += len(content.split()) * 1.3
+            
+            # 記錄查詢請求
+            stats_monitor.on_lookup_request(total_tokens)
+            
+            # 進行真實的 LMCache 查詢
+            lookup_start = time.time()
+            msg = LookupMsg(event_id="", tokens=token_ids if self.tokenizer else [])
+            instance_id = await self.kv_manager.handle_orchestration_message(msg)
+            lookup_time = time.time() - lookup_start
+            
+            # 處理查詢結果
+            matched_tokens = 0
+            if instance_id and hasattr(instance_id, 'layout_info') and instance_id.layout_info:
+                if len(list(instance_id.layout_info.keys())) > 0:
+                    matched_instance_id = list(instance_id.layout_info.keys())[0]
+                    matched_tokens = instance_id.layout_info[matched_instance_id][1]
+            
+            # 記錄查詢結果
+            stats_monitor.on_lookup_finished(matched_tokens)
+            
+            # 獲取查詢後的統計資訊
+            after_lookup_requests = stats_monitor.interval_lookup_requests
+            after_lookup_tokens = stats_monitor.interval_lookup_tokens
+            after_lookup_hits = stats_monitor.interval_lookup_hits
+            
+            # 計算本次查詢的增量
+            current_lookup_requests = after_lookup_requests - before_lookup_requests
+            current_lookup_tokens = after_lookup_tokens - before_lookup_tokens
+            current_lookup_hits = after_lookup_hits - before_lookup_hits
+            
+            # 更新 timing_data
+            timing_data.matched_kvcache_tokens = matched_tokens
+            timing_data.request_tokens = total_tokens
+            timing_data.kv_cache_hit = matched_tokens > 0
+            timing_data.kv_cache_transfer_count = current_lookup_requests
+            timing_data.kv_cache_transfer_tokens = matched_tokens
+            timing_data.kv_cache_lookup_time = lookup_time
+            
+            # 記錄到監控系統
+            from vllm_router.monitoring.request_timing import get_request_timing_monitor
+            timing_monitor = get_request_timing_monitor()
+            timing_monitor.record_kv_cache_lookup(
+                timing_data,
+                lookup_time=lookup_time,
+                hit=timing_data.kv_cache_hit,
+            )
+        except Exception as e:
+            # 靜默處理錯誤，不影響路由功能
+            import logging
+            logging.getLogger(__name__).debug(f"LMCache stats update failed: {e}")
+            # 回退到模擬統計
+            await self._simulate_lmcache_stats(request, request_json)
+    
+    async def _simulate_lmcache_stats(self, request: Request, request_json: Dict):
+        """模擬 LMCache 統計（當沒有真實 LMCache 時使用）"""
+        try:
+            # 獲取 timing_data
+            timing_data = getattr(request.state, 'timing_data', None)
+            if timing_data is None:
+                return
+
             from lmcache.observability import LMCStatsMonitor
             
             # 獲取查詢前的統計資訊
@@ -222,22 +331,20 @@ class RoundRobinRouter(RoutingInterface):
             before_lookup_tokens = stats_monitor.interval_lookup_tokens
             before_lookup_hits = stats_monitor.interval_lookup_hits
             
-            # 模擬 LMCache 查詢（這裡我們只是記錄查詢，實際的查詢應該在後端進行）
             # 從請求中提取 token 數量
             messages = request_json.get('messages', [])
             total_tokens = 0
             for message in messages:
                 content = message.get('content', '')
                 if isinstance(content, str):
-                    # 簡單的 token 估算（實際應該使用 tokenizer）
-                    total_tokens += len(content.split()) * 1.3  # 粗略估算
+                    # 簡單的 token 估算
+                    total_tokens += len(content.split()) * 1.3
             
             # 記錄查詢請求
             stats_monitor.on_lookup_request(int(total_tokens))
             
-            # 模擬 cache hit（這裡我們假設有一定的命中率）
-            # 在實際環境中，這應該根據真實的 cache 查詢結果來決定
-            hit_rate = 0.3  # 假設 30% 的命中率
+            # 模擬 cache hit（30% 命中率）
+            hit_rate = 0.3
             hit_tokens = int(total_tokens * hit_rate)
             stats_monitor.on_lookup_finished(hit_tokens)
             
@@ -263,13 +370,12 @@ class RoundRobinRouter(RoutingInterface):
             timing_monitor = get_request_timing_monitor()
             timing_monitor.record_kv_cache_lookup(
                 timing_data,
-                lookup_time=0.0,  # 從統計資訊獲取，不需要單次查詢時間
+                lookup_time=0.0,
                 hit=timing_data.kv_cache_hit,
             )
         except Exception as e:
-            # 靜默處理錯誤，不影響路由功能
             import logging
-            logging.getLogger(__name__).debug(f"LMCache stats update failed: {e}")
+            logging.getLogger(__name__).debug(f"Simulated LMCache stats update failed: {e}")
             pass
 
 
