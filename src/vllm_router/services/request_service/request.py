@@ -355,7 +355,11 @@ async def route_general_request(
                     token_ids = []
 
                 if token_ids:
-                    kv_mgr = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
+                    # 使用單例模式避免重複創建連接
+                    if not hasattr(request.app.state, '_lmcache_manager'):
+                        request.app.state._lmcache_manager = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
+                    
+                    kv_mgr = request.app.state._lmcache_manager
                     msg = LookupMsg(event_id="", tokens=token_ids)
                     # This call is sync in KvawareRouter via await; here we provide a sync handle
                     # The manager internally handles the orchestration; if it fails, we ignore.
