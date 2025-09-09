@@ -224,6 +224,12 @@ class RoundRobinRouter(RoutingInterface):
             if timing_data is None:
                 return
 
+            # 設置 LMCache 的 request_id 以便對應
+            from lmcache.observability import LMCStatsMonitor
+            lmcache_monitor = LMCStatsMonitor.GetOrCreate()
+            request_id = getattr(request.state, 'request_id', 'unknown')
+            lmcache_monitor.set_request_id(request_id)
+
             # 如果沒有 LMCache 管理器，使用模擬統計
             if self.kv_manager is None:
                 await self._simulate_lmcache_stats(request, request_json)
