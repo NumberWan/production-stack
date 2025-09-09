@@ -216,36 +216,31 @@ class UserSession:
         self.launch_times.append(response.launch_time)
         self.finish_times.append(response.finish_time)
 
-    def _build_system_prompt(self):
+    def _ensure_dataset_loaded(self):
         if UserSession._pre_generated_texts is None:
             try:
-                # 嘗試從CSV文件加載預生成的文本
+                # 從 CSV 加載預生成文本
                 df = pd.read_csv("/home/w00917303/production-stack/benchmarks/multi-round-qa/gen.csv")
                 UserSession._pre_generated_texts = df['text'].tolist()
                 logger.info(f"Loaded {len(UserSession._pre_generated_texts)} pre-generated texts")
-                # 如果文件不存在，使用簡單的備用文本
             except FileNotFoundError:
-                UserSession._pre_generated_texts = ["Default system context text."] * 5000
+                UserSession._pre_generated_texts = ["Default user text."] * 5000
                 logger.warning("gen.csv not found, using default texts")
-        
-        dummy_text_sys = UserSession._pre_generated_texts[UserSession._current_index]
+
+    def _next_dataset_text(self):
+        self._ensure_dataset_loaded()
+        text = UserSession._pre_generated_texts[UserSession._current_index]
         UserSession._current_index = (UserSession._current_index + 1) % len(UserSession._pre_generated_texts)
-        dummy_text_user = self._pre_generated_texts[UserSession._current_index]
-        UserSession._current_index = (self._current_index + 1) % len(UserSession._pre_generated_texts)     
-        
-        system_prompt = (
-            f"Hi, here's some system prompt: {dummy_text_sys}."
-            + f"For user {self.user_config.user_id}, "
-            + f"here are some other context: {dummy_text_user}."
-        )
-        return system_prompt
+        return text
+
+    def _build_system_prompt(self):
+        # 忽略 system prompt（按你的需求）
+        return ""
 
     def _build_new_question(self):
+        # 使用數據集中的文本作為用戶 prompt（不再拼系統 prompt）
         self.question_id += 1
-        return (
-            f"Here's question #{self.question_id}: can you tell me "
-            + "a new long story with a happy ending?"
-        )
+        return self._next_dataset_text()
 
     def _launch_new_request(self, timestamp: float, request_executor: RequestExecutor):
         if self.use_sharegpt:
@@ -260,8 +255,7 @@ class UserSession:
             self.question_id += 1
         else:
             prompt = self._build_new_question()
-        if len(self.chat_history) == 0:
-            prompt = self._build_system_prompt() + prompt
+        # 不再在第一條消息拼接 system prompt
         self.chat_history.on_user_query(prompt)
         logger.debug(
             f"User {self.user_config.user_id} issues request {self.question_id}"
