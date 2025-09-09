@@ -29,6 +29,7 @@ from vllm_router.routers.routing_logic import (
     DisaggregatedPrefillRouter,
     KvawareRouter,
     PrefixAwareRouter,
+    RoundRobinRouter,
     TtftRouter,
 )
 from vllm_router.service_discovery import get_service_discovery
