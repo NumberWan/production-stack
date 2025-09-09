@@ -229,6 +229,7 @@ class RoundRobinRouter(RoutingInterface):
             lmcache_monitor = LMCStatsMonitor.GetOrCreate()
             request_id = getattr(request.state, 'request_id', 'unknown')
             lmcache_monitor.set_request_id(request_id)
+            logger.debug(f"Set LMCache request_id: {request_id}")
 
             # 如果沒有 LMCache 管理器，使用模擬統計
             if self.kv_manager is None:

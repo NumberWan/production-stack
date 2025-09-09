@@ -65,8 +65,9 @@ async def route_chat_completion(request: Request, background_tasks: BackgroundTa
         model=model
     )
     
-    # 將 timing_data 存儲到 request state 中，供後續使用
+    # 將 timing_data 和 request_id 存儲到 request state 中，供後續使用
     request.state.timing_data = timing_data
+    request.state.request_id = request_id
     
     try:
         if semantic_cache_available:
@@ -113,8 +114,9 @@ async def route_completion(request: Request, background_tasks: BackgroundTasks):
         model=model
     )
     
-    # 將 timing_data 存儲到 request state 中，供後續使用
+    # 將 timing_data 和 request_id 存儲到 request state 中，供後續使用
     request.state.timing_data = timing_data
+    request.state.request_id = request_id
     
     try:
         response = await route_general_request(request, "/v1/completions", background_tasks)
