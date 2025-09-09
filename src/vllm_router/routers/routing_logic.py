@@ -252,7 +252,7 @@ class RoundRobinRouter(RoutingInterface):
             
             kv_mgr = request.app.state._lmcache_manager
             msg = LookupMsg(event_id="", tokens=token_ids)
-            # 現在是異步環境，可以直接 await
+            # 使用與 KvawareRouter 相同的方法
             instance_id = await kv_mgr.handle_orchestration_message(msg)
             
             matched_tokens = math.inf
@@ -393,11 +393,11 @@ class KvawareRouter(RoutingInterface):
 
     # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
-    def query_manager(self, msg) -> str:
+    async def query_manager(self, msg) -> str:
         """
         Get the instance id for the given message
         """
-        instance_id = self.kv_manager.handle_orchestration_message(msg)
+        instance_id = await self.kv_manager.handle_orchestration_message(msg)
         return instance_id
 
     async def route_request(
@@ -454,11 +454,17 @@ class KvawareRouter(RoutingInterface):
         msg = LookupMsg(event_id="", tokens=token_ids)
         instance_id = await self.query_manager(msg)
         matched_tokens = math.inf
-        if len(list(instance_id.layout_info.keys())) > 0:
-            matched_instance_id = list(instance_id.layout_info.keys())[
-                0
-            ]  # Get the first key
-            matched_tokens = instance_id.layout_info[matched_instance_id][1]
+        logger.info(f"KV instance_id: {instance_id}")
+        if instance_id and hasattr(instance_id, 'layout_info') and instance_id.layout_info:
+            logger.info(f"KV layout_info: {instance_id.layout_info}")
+            if len(list(instance_id.layout_info.keys())) > 0:
+                matched_instance_id = list(instance_id.layout_info.keys())[
+                    0
+                ]  # Get the first key
+                matched_tokens = instance_id.layout_info[matched_instance_id][1]
+                logger.info(f"KV matched_tokens: {matched_tokens}")
+        else:
+            logger.info("KV no layout_info or empty layout_info")
         timing_data['lookup_time'] = time.time() - lookup_start
         # 寫入到全局簡化輸出（如有 timing_data）
         try:
