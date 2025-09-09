@@ -174,10 +174,11 @@ class RoundRobinRouter(RoutingInterface):
         engine_stats: Dict[str, EngineStats],
         request_stats: Dict[str, RequestStats],
         request: Request,
+        request_json: Dict = None,
     ) -> str:
         """
         Route the request to the appropriate engine URL using a simple
-        round-robin algorithm
+        round-robin algorithm with optional LMCache lookup for monitoring
 
         Args:
             endpoints (List[EndpointInfo]): The list of engine URLs
@@ -186,6 +187,7 @@ class RoundRobinRouter(RoutingInterface):
             request_stats (Dict[str, RequestStats]): The request stats
                 indicating the request-level performance of each engine
             request (Request): The incoming request
+            request_json (Dict, optional): The request body for LMCache lookup
         """
         endpoints_id = id(endpoints)
         if endpoints_id != self.last_endpoints_id:
@@ -197,9 +199,81 @@ class RoundRobinRouter(RoutingInterface):
         chosen = self.sorted_endpoints[self.req_id % len(self.sorted_endpoints)]
         self.req_id += 1
 
-        # LMCache lookup is now handled in route_general_request before routing
+        # 執行非侵入式 LMCache lookup 用於監控（不影響路由決策）
+        if request_json is not None:
+            self._perform_lmcache_lookup(request, request_json, endpoints)
 
         return chosen.url
+
+    def _perform_lmcache_lookup(self, request: Request, request_json: Dict, endpoints: List[EndpointInfo]):
+        """執行 LMCache lookup 用於監控，重用 KvawareRouter 的邏輯"""
+        try:
+            # 檢查是否有 LMCache controller port
+            lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
+            if lmcache_port is None:
+                return
+
+            # 獲取 timing_data
+            timing_data = getattr(request.state, 'timing_data', None)
+            if timing_data is None:
+                return
+
+            # 重用 KvawareRouter 的 lookup 邏輯
+            from lmcache.v1.cache_controller import controller_manager  # type: ignore
+            from lmcache.v1.cache_controller.message import LookupMsg  # type: ignore
+            from transformers import AutoTokenizer  # type: ignore
+            from vllm_router.monitoring.request_timing import get_request_timing_monitor
+            import math
+            import time
+
+            # 步驟1: Tokenize（重用 KvawareRouter 邏輯）
+            tokenize_start = time.time()
+            if not hasattr(request.app.state, '_rr_tokenizer'):
+                request.app.state._rr_tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
+            tokenizer = request.app.state._rr_tokenizer
+            token_ids = tokenizer.encode(extract_prompt(request_json))
+            tokenize_time = time.time() - tokenize_start
+
+            # 步驟2: Lookup（重用 KvawareRouter 邏輯）
+            lookup_start = time.time()
+            if not hasattr(request.app.state, '_lmcache_manager'):
+                request.app.state._lmcache_manager = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
+            
+            kv_mgr = request.app.state._lmcache_manager
+            msg = LookupMsg(event_id="", tokens=token_ids)
+            instance_id = kv_mgr.handle_orchestration_message(msg)
+            
+            matched_tokens = math.inf
+            if instance_id and len(list(instance_id.layout_info.keys())) > 0:
+                matched_instance_id = list(instance_id.layout_info.keys())[0]
+                matched_tokens = instance_id.layout_info[matched_instance_id][1]
+            
+            lookup_time = time.time() - lookup_start
+
+            # 寫入到 timing_data（重用 KvawareRouter 邏輯）
+            timing_data.lookup_time = lookup_time
+            timing_data.matched_kvcache_tokens = int(matched_tokens if matched_tokens != math.inf else 0)
+            timing_data.request_tokens = int(len(token_ids))
+            
+            # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
+            uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens if matched_tokens != math.inf else 0))
+            if uncached_tokens > 0:
+                timing_data.kv_cache_transfer_count += 1
+                timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
+            
+            # 記錄 lookup 結果
+            timing_monitor = get_request_timing_monitor()
+            timing_monitor.record_kv_cache_lookup(
+                timing_data,
+                lookup_time=lookup_time,
+                hit=bool(matched_tokens != math.inf and matched_tokens > 0),
+            )
+            
+        except Exception as e:
+            # 靜默處理錯誤，不影響路由
+            import logging
+            logging.getLogger(__name__).debug(f"RR LMCache lookup failed: {e}")
+            pass
 
 
 class SessionRouter(RoutingInterface):
