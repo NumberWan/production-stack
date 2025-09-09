@@ -256,9 +256,15 @@ class RoundRobinRouter(RoutingInterface):
             instance_id = await kv_mgr.handle_orchestration_message(msg)
             
             matched_tokens = math.inf
-            if instance_id and len(list(instance_id.layout_info.keys())) > 0:
-                matched_instance_id = list(instance_id.layout_info.keys())[0]
-                matched_tokens = instance_id.layout_info[matched_instance_id][1]
+            logger.info(f"RR instance_id: {instance_id}")
+            if instance_id and hasattr(instance_id, 'layout_info') and instance_id.layout_info:
+                logger.info(f"RR layout_info: {instance_id.layout_info}")
+                if len(list(instance_id.layout_info.keys())) > 0:
+                    matched_instance_id = list(instance_id.layout_info.keys())[0]
+                    matched_tokens = instance_id.layout_info[matched_instance_id][1]
+                    logger.info(f"RR matched_tokens from layout_info: {matched_tokens}")
+            else:
+                logger.info("RR no layout_info or empty layout_info")
             
             lookup_time = time.time() - lookup_start
 
