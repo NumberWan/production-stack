@@ -235,6 +235,12 @@ class RoundRobinRouter(RoutingInterface):
             # 記錄查詢請求
             stats_monitor.on_lookup_request(int(total_tokens))
             
+            # 模擬 cache hit（這裡我們假設有一定的命中率）
+            # 在實際環境中，這應該根據真實的 cache 查詢結果來決定
+            hit_rate = 0.3  # 假設 30% 的命中率
+            hit_tokens = int(total_tokens * hit_rate)
+            stats_monitor.on_lookup_finished(hit_tokens)
+            
             # 獲取查詢後的統計資訊
             after_lookup_requests = stats_monitor.interval_lookup_requests
             after_lookup_tokens = stats_monitor.interval_lookup_tokens
