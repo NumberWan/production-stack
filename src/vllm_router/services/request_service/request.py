@@ -328,69 +328,63 @@ async def route_general_request(
     # 為 Round Robin 路由執行非侵入式 LMCache lookup（在路由選擇前）
     if isinstance(request.app.state.router, RoundRobinRouter):
         import logging
+        import math
         logging.getLogger(__name__).info("RR router detected, attempting LMCache lookup")
         try:
             # Only attempt when controller port is available
             lmcache_port = getattr(request.app.state, 'lmcache_controller_port', None)
             logging.getLogger(__name__).info(f"LMCache port: {lmcache_port}, timing_data: {timing_data is not None}")
             if lmcache_port is not None and timing_data is not None:
-                # Lazy import to avoid hard dependency
+                # 重用 KvawareRouter 的 lookup 邏輯
                 from lmcache.v1.cache_controller import controller_manager  # type: ignore
                 from lmcache.v1.cache_controller.message import LookupMsg  # type: ignore
                 from transformers import AutoTokenizer  # type: ignore
                 from vllm_router.routers.routing_logic import extract_prompt
 
-                # Build a minimal prompt from request body
-                token_ids = []
-                try:
-                    prompt = extract_prompt(request_json)
-                    # Use first endpoint's model as tokenizer source
-                    if endpoints and endpoints[0].model_names:
-                        tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
-                        token_ids = tokenizer.encode(prompt)
-                except Exception as e:
-                    # Debug: log the exception to understand why lookup fails
-                    import logging
-                    logging.getLogger(__name__).info(f"RR lookup failed to get tokens: {e}")
-                    token_ids = []
+                # 步驟1: Tokenize（重用 KvawareRouter 邏輯）
+                tokenize_start = time.time()
+                if not hasattr(request.app.state, '_rr_tokenizer'):
+                    request.app.state._rr_tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
+                tokenizer = request.app.state._rr_tokenizer
+                token_ids = tokenizer.encode(extract_prompt(request_json))
+                tokenize_time = time.time() - tokenize_start
 
-                if token_ids:
-                    # 使用單例模式避免重複創建連接
-                    if not hasattr(request.app.state, '_lmcache_manager'):
-                        request.app.state._lmcache_manager = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
-                    
-                    kv_mgr = request.app.state._lmcache_manager
-                    msg = LookupMsg(event_id="", tokens=token_ids)
-                    # This call is sync in KvawareRouter via await; here we provide a sync handle
-                    # The manager internally handles the orchestration; if it fails, we ignore.
-                    res = kv_mgr.handle_orchestration_message(msg)
+                # 步驟2: Lookup（重用 KvawareRouter 邏輯）
+                lookup_start = time.time()
+                if not hasattr(request.app.state, '_lmcache_manager'):
+                    request.app.state._lmcache_manager = controller_manager.LMCacheControllerManager(f"0.0.0.0:{lmcache_port}")
+                
+                kv_mgr = request.app.state._lmcache_manager
+                msg = LookupMsg(event_id="", tokens=token_ids)
+                instance_id = kv_mgr.handle_orchestration_message(msg)
+                
+                matched_tokens = math.inf
+                if instance_id and len(list(instance_id.layout_info.keys())) > 0:
+                    matched_instance_id = list(instance_id.layout_info.keys())[0]
+                    matched_tokens = instance_id.layout_info[matched_instance_id][1]
+                
+                lookup_time = time.time() - lookup_start
 
-                    matched_tokens = 0
-                    try:
-                        if res and getattr(res, 'layout_info', None):
-                            # Pick max matched tokens across instances
-                            matched_tokens = max(v[1] for v in res.layout_info.values())
-                    except Exception:
-                        matched_tokens = 0
-
-                    # Write into timing data for CSV
-                    timing_data.matched_kvcache_tokens = int(matched_tokens)
-                    timing_data.request_tokens = int(len(token_ids))
-                    # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
-                    uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens))
-                    if uncached_tokens > 0:
-                        timing_data.kv_cache_transfer_count += 1
-                        timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
-                    # We cannot precisely time lookup here; set to 0 if unknown
-                    timing_monitor.record_kv_cache_lookup(
-                        timing_data,
-                        lookup_time=0.0,
-                        hit=bool(matched_tokens > 0),
-                    )
-                    
-                    # Debug: log the values being set
-                    import logging
-                    logging.getLogger(__name__).info(f"RR lookup: tokens={len(token_ids)}, matched={matched_tokens}, hit={bool(matched_tokens > 0)}")
+                # 寫入到 timing_data（重用 KvawareRouter 邏輯）
+                timing_data.lookup_time = lookup_time
+                timing_data.matched_kvcache_tokens = int(matched_tokens if matched_tokens != math.inf else 0)
+                timing_data.request_tokens = int(len(token_ids))
+                
+                # 估算：未命中部分可能需傳輸的 token 數（監控用，不影響路由）
+                uncached_tokens = max(0, int(len(token_ids)) - int(matched_tokens if matched_tokens != math.inf else 0))
+                if uncached_tokens > 0:
+                    timing_data.kv_cache_transfer_count += 1
+                    timing_data.kv_cache_transfer_tokens += int(uncached_tokens)
+                
+                # 記錄 lookup 結果
+                timing_monitor.record_kv_cache_lookup(
+                    timing_data,
+                    lookup_time=lookup_time,
+                    hit=bool(matched_tokens != math.inf and matched_tokens > 0),
+                )
+                
+                # Debug: log the values being set
+                logging.getLogger(__name__).info(f"RR lookup: tokens={len(token_ids)}, matched={matched_tokens if matched_tokens != math.inf else 0}, hit={bool(matched_tokens != math.inf and matched_tokens > 0)}")
         except Exception as e:
             # Debug: log the exception to understand why lookup fails
             import logging
