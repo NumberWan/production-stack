@@ -1052,7 +1052,7 @@ def initialize_routing_logic(
 ) -> RoutingInterface:
     if routing_logic == RoutingLogic.ROUND_ROBIN:
         logger.info("Initializing round-robin routing logic")
-        return RoundRobinRouter()
+        return RoundRobinRouter(kwargs.get("lmcache_controller_port"))
     elif routing_logic == RoutingLogic.SESSION_BASED:
         logger.info(f"Initializing session-based routing logic with kwargs: {kwargs}")
         return SessionRouter(kwargs.get("session_key"))
