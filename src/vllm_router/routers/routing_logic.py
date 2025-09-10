@@ -353,7 +353,7 @@ class KvawareRouter(RoutingInterface):
         
         # 步驟2: Lookup（僅計 LookupMsg 送出到返回的用時） !!!!!!!!!!!!!!!
         lookup_start = time.time()
-        msg = LookupMsg(event_id="", tokens=token_ids)
+        msg = LookupMsg(tokens=token_ids)
         instance_id = await self.query_manager(msg)
         matched_tokens = math.inf
         if len(list(instance_id.layout_info.keys())) > 0:
@@ -409,7 +409,6 @@ class KvawareRouter(RoutingInterface):
             if queried_instance_ids[0] not in self.instance_id_to_url:
                 for endpoint in endpoints:
                     query_message = QueryInstMsg(
-                        event_id="",
                         ip=endpoint.url.split(f":{endpoint.url.split(':')[-1]}")[
                             0
                         ].split("//")[1]
@@ -675,7 +674,7 @@ class TtftRouter(RoutingInterface):
                 raise ValueError("no request stats was provided")
             # 僅計 FullLookupMsg 的用時
             full_lookup_start = time.time()
-            msg = FullLookupMsg(event_id="", tokens=token_ids)
+            msg = FullLookupMsg(tokens=token_ids)
             ret_msg = await self.kv_manager.handle_orchestration_message(msg)
             matched_infos = ret_msg.matched_info
             timing_data['lookup_time'] = time.time() - full_lookup_start
@@ -820,7 +819,6 @@ class TtftRouter(RoutingInterface):
             return url
         for endpoint in endpoints:
             msg = QueryInstMsg(
-                event_id="",
                 ip=endpoint.url.split(f":{endpoint.url.split(":")[-1]}")[
                     0
                 ].split("//")[1]
