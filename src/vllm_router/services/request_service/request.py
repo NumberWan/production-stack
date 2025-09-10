@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from requests import JSONDecodeError
 
 from vllm_router.log import init_logger
+from vllm_router.monitoring.request_timing import get_request_timing_monitor
 from vllm_router.routers.routing_logic import (
     DisaggregatedPrefillRouter,
     KvawareRouter,
@@ -80,9 +81,22 @@ async def process_request(
     Raises:
         HTTPError: If the backend returns a 4xx or 5xx status code.
     """
+    # 獲取時間追蹤監控器
+    timing_monitor = get_request_timing_monitor()
+    timing_data = getattr(request.state, 'timing_data', None)
+    
     first_token = False
     total_len = 0
     start_time = time.time()
+    
+    # 記錄後端連接開始時間
+    if timing_data:
+        timing_monitor.record_backend_processing_start(timing_data)
+    
+    # 確保相對時間基準存在
+    if timing_data and getattr(timing_data, '_start_epoch', 0) == 0:
+        timing_data._start_epoch = start_time
+
     request.app.state.request_stats_monitor.on_new_request(
         backend_url, request_id, start_time, cache_info
     )
@@ -97,6 +111,8 @@ async def process_request(
     # For non-streaming requests, collect the full response to cache it properly
     full_response = bytearray()
 
+    # 記錄後端連接時間
+    backend_connection_start = time.time()
     async with request.app.state.aiohttp_client_wrapper().request(
         method=request.method,
         url=backend_url + endpoint,
@@ -104,6 +120,12 @@ async def process_request(
         data=body,
         timeout=aiohttp.ClientTimeout(total=None),
     ) as backend_response:
+        status_code = backend_response.status
+        backend_connection_time = time.time() - backend_connection_start
+        if timing_data:
+            # 只輸出簡化欄位需要：backend_connection_time
+            timing_monitor.record_step_time(timing_data, 'backend_connection_time', backend_connection_time)
+        
         # Yield headers and status code first.
         yield backend_response.headers, backend_response.status
         # Stream response content.
@@ -111,6 +133,10 @@ async def process_request(
             total_len += len(chunk)
             if not first_token:
                 first_token = True
+                if timing_data:
+                    # 記錄首 token（相對請求開始）及將此刻視為 decode 開始
+                    timing_monitor.record_first_token(timing_data)
+                    timing_monitor.record_response_streaming_start(timing_data)
                 request.app.state.request_stats_monitor.on_request_response(
                     backend_url, request_id, time.time()
                 )
@@ -118,7 +144,18 @@ async def process_request(
             if full_response is not None:
                 full_response.extend(chunk)
             yield chunk
+        
+        # 記錄最後一個 token 時間（並結束 decode 計時）
+        if timing_data:
+            timing_monitor.record_last_token(timing_data)
+            timing_monitor.record_response_streaming_end(timing_data)
 
+    # 記錄後端處理結束時間
+    if timing_data:
+        timing_monitor.record_backend_processing_end(timing_data)
+        timing_data.total_tokens = total_len
+        timing_data.is_streaming = is_streaming
+    
     request.app.state.request_stats_monitor.on_request_complete(
         backend_url, request_id, time.time()
     )
@@ -136,6 +173,17 @@ async def process_request(
         background_tasks.add_task(
             request.app.state.callbacks.post_request, request, full_response
         )
+
+    # 在此統一完成計時（含 ttft / decode_time）
+    if timing_data:
+        try:
+            timing_monitor.complete_request(
+                timing_data,
+                server_url=backend_url,
+                status_code=int(status_code) if 'status_code' in locals() else 200,
+            )
+        except Exception:
+            pass
 
 
 async def route_general_request(
@@ -156,16 +204,29 @@ async def route_general_request(
     Returns:
         StreamingResponse: A response object that streams data from the backend server to the client.
     """
+    # 獲取時間追蹤監控器
+    timing_monitor = get_request_timing_monitor()
+    
     if isinstance(request.app.state.router, DisaggregatedPrefillRouter):
         response = await route_disaggregated_prefill_request(
             request, endpoint, background_tasks
         )
         return response
+    
     in_router_time = time.time()
     # Same as vllm, Get request_id from X-Request-Id header if available
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    
+    # 記錄請求解析開始時間
+    request_parsing_start = time.time()
     request_body = await request.body()
     request_json = json.loads(request_body)
+    request_parsing_time = time.time() - request_parsing_start
+    
+    # 獲取或創建 timing_data
+    timing_data = getattr(request.state, 'timing_data', None)
+    if timing_data:
+        timing_monitor.record_step_time(timing_data, 'request_parsing_time', request_parsing_time)
 
     if request.query_params:
         request_endpoint = request.query_params.get("id")
@@ -180,13 +241,21 @@ async def route_general_request(
         response_overwrite.headers["X-Request-Id"] = request_id
         return response_overwrite
 
+    # 記錄模型驗證時間
+    model_validation_start = time.time()
     requested_model = request_json.get("model", None)
     if requested_model is None:
+        if timing_data:
+            timing_monitor.complete_request(timing_data, status_code=400, error_message="Missing model")
         return JSONResponse(
             status_code=400,
             content={"error": "Invalid request: missing 'model' in request body."},
             headers={"X-Request-Id": request_id},
         )
+    model_validation_time = time.time() - model_validation_start
+    
+    if timing_data:
+        timing_monitor.record_step_time(timing_data, 'model_validation_time', model_validation_time)
 
     # Apply request rewriting if enabled
     if is_request_rewriter_initialized():
@@ -205,8 +274,14 @@ async def route_general_request(
                 status_code=400, detail="Request body is not JSON parsable."
             )
 
+    # 記錄端點發現時間
+    endpoint_discovery_start = time.time()
     service_discovery = get_service_discovery()
     endpoints = service_discovery.get_endpoint_info()
+    endpoint_discovery_time = time.time() - endpoint_discovery_start
+    
+    if timing_data:
+        timing_monitor.record_step_time(timing_data, 'endpoint_discovery_time', endpoint_discovery_time)
 
     aliases = getattr(service_discovery, "aliases", None)
     if aliases and requested_model in aliases.keys():
@@ -248,6 +323,9 @@ async def route_general_request(
     cache_info = None
 
     logger.debug(f"Routing request {request_id} for model: {requested_model}")
+    
+    # 記錄路由決策時間
+    routing_decision_start = time.time()
     if request_endpoint:
         server_url = endpoints[0].url
         logger.debug(
@@ -261,6 +339,21 @@ async def route_general_request(
         route_result = request.app.state.router.route_request(
             endpoints, engine_stats, request_stats, request
         )
+    routing_decision_time = time.time() - routing_decision_start
+    
+    if timing_data:
+        # 路由決策耗時
+        timing_monitor.record_step_time(timing_data, 'routing_decision_time', routing_decision_time)
+        # 記錄路由器類型（簡化輸出用）
+        router_cls = type(request.app.state.router).__name__
+        router_map = {
+            'KvawareRouter': 'kvaware',
+            'PrefixAwareRouter': 'prefixaware',
+            'TtftRouter': 'ttft',
+            'RoundRobinRouter': 'roundrobin',
+            'SessionRouter': 'session',
+        }
+        timing_data.routing_logic = router_map.get(router_cls, router_cls.lower())
 
     if isinstance(route_result, (tuple, list)):
         server_url = route_result[0]

@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import time
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm_router.dynamic_config import get_dynamic_config_watcher
 from vllm_router.log import init_logger
+from vllm_router.monitoring.request_timing import get_request_timing_monitor
 from vllm_router.protocols import ModelCard, ModelList
 from vllm_router.service_discovery import get_service_discovery
 from vllm_router.services.request_service.request import (
@@ -44,24 +46,83 @@ logger = init_logger(__name__)
 
 @main_router.post("/v1/chat/completions")
 async def route_chat_completion(request: Request, background_tasks: BackgroundTasks):
-    if semantic_cache_available:
-        # Check if the request can be served from the semantic cache
-        logger.debug("Received chat completion request, checking semantic cache")
-        cache_response = await check_semantic_cache(request=request)
-
-        if cache_response:
-            logger.info("Serving response from semantic cache")
-            return cache_response
-
-    logger.debug("No cache hit, forwarding request to backend")
-    return await route_general_request(
-        request, "/v1/chat/completions", background_tasks
+    # 開始請求時間追蹤
+    timing_monitor = get_request_timing_monitor()
+    request_id = request.headers.get("X-Request-Id") or f"chat_{int(time.time() * 1000)}"
+    
+    # 獲取請求體以提取模型信息
+    request_body = await request.body()
+    try:
+        request_json = json.loads(request_body)
+        model = request_json.get("model", "")
+    except:
+        model = ""
+    
+    # 開始追蹤
+    timing_data = timing_monitor.start_request(
+        request_id=request_id,
+        endpoint="/v1/chat/completions",
+        model=model
     )
+    
+    # 將 timing_data 存儲到 request state 中，供後續使用
+    request.state.timing_data = timing_data
+    
+    try:
+        if semantic_cache_available:
+            # Check if the request can be served from the semantic cache
+            logger.debug("Received chat completion request, checking semantic cache")
+            cache_response = await check_semantic_cache(request=request)
+
+            if cache_response:
+                logger.info("Serving response from semantic cache")
+                timing_monitor.complete_request(timing_data, status_code=200)
+                return cache_response
+
+        logger.debug("No cache hit, forwarding request to backend")
+        response = await route_general_request(
+            request, "/v1/chat/completions", background_tasks
+        )
+        # 注意：完成請求的結算在 process_request 結束後統一寫入
+        return response
+        
+    except Exception as e:
+        # 記錄錯誤
+        timing_monitor.complete_request(timing_data, status_code=500, error_message=str(e))
+        raise
 
 
 @main_router.post("/v1/completions")
 async def route_completion(request: Request, background_tasks: BackgroundTasks):
-    return await route_general_request(request, "/v1/completions", background_tasks)
+    # 開始請求時間追蹤
+    timing_monitor = get_request_timing_monitor()
+    request_id = request.headers.get("X-Request-Id") or f"completion_{int(time.time() * 1000)}"
+    
+    # 獲取請求體以提取模型信息
+    request_body = await request.body()
+    try:
+        request_json = json.loads(request_body)
+        model = request_json.get("model", "")
+    except:
+        model = ""
+    
+    # 開始追蹤
+    timing_data = timing_monitor.start_request(
+        request_id=request_id,
+        endpoint="/v1/completions",
+        model=model
+    )
+    
+    # 將 timing_data 存儲到 request state 中，供後續使用
+    request.state.timing_data = timing_data
+    
+    try:
+        response = await route_general_request(request, "/v1/completions", background_tasks)
+        # 注意：完成請求的結算在 process_request 結束後統一寫入
+        return response
+    except Exception as e:
+        timing_monitor.complete_request(timing_data, status_code=500, error_message=str(e))
+        raise
 
 
 @main_router.post("/v1/embeddings")

@@ -19,6 +19,7 @@ import math
 import random
 import threading
 import traceback
+import time
 from typing import Dict, List, Optional, Tuple, Union
 
 from fastapi import Request
@@ -40,6 +41,7 @@ except ImportError:
 from uhashring import HashRing
 
 from vllm_router.log import init_logger
+from vllm_router.monitoring.request_timing import get_request_timing_monitor
 from vllm_router.service_discovery import EndpointInfo
 from vllm_router.stats.engine_stats import EngineStats
 from vllm_router.stats.request_stats import RequestStats, RequestStatsCacheInfo
@@ -137,7 +139,7 @@ class RoutingInterface(metaclass=SingletonABCMeta):
         engine_stats: Dict[str, EngineStats],
         request_stats: Dict[str, RequestStats],
         request: Request,
-    ) -> Union(str, Tuple[str, RequestStatsCacheInfo]):
+    ) -> Union[str, Tuple[str, RequestStatsCacheInfo]]:
         """
         Route the request to the appropriate engine URL
 
@@ -278,6 +280,7 @@ class KvawareRouter(RoutingInterface):
         self.tokenizer_name = tokenizer_name
         self.tokenizer = None
         self.threshold = kv_aware_threshold
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     def start_kv_manager(self):
         """
@@ -289,6 +292,8 @@ class KvawareRouter(RoutingInterface):
         asyncio.run_coroutine_threadsafe(self.kv_manager.start_all(), self.loop)
         if self.tokenizer_name is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+
+    # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
     def query_manager(self, msg) -> str:
         """
@@ -321,11 +326,33 @@ class KvawareRouter(RoutingInterface):
             request_json (Dict): The request body (needed for finding the
             longest prefix match)
         """
+        # 開始性能監控
+        start_time = time.time()
+        
+        # 獲取全局時間追蹤監控器
+        timing_monitor = get_request_timing_monitor()
+        timing_data = {
+            'total_time': 0,
+            'tokenize_time': 0,
+            'lookup_time': 0,
+            'hash_routing_time': 0,
+            'instance_mapping_time': 0,
+            'find_best_matched_time': 0,
+            'find_best_ttft_time': 0,
+            'fallback_time': 0
+        }
+        
+        # 步驟1: Tokenize !!!!!!!!!!!!!!!
+        tokenize_start = time.time()
         if self.tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
         url = endpoints[0].url + "/tokenize"
         # TODO (Yuhan): Handle chat completions
         token_ids = self.tokenizer.encode(extract_prompt(request_json))
+        timing_data['tokenize_time'] = time.time() - tokenize_start
+        
+        # 步驟2: Lookup（僅計 LookupMsg 送出到返回的用時） !!!!!!!!!!!!!!!
+        lookup_start = time.time()
         msg = LookupMsg(event_id="", tokens=token_ids)
         instance_id = await self.query_manager(msg)
         matched_tokens = math.inf
@@ -334,13 +361,24 @@ class KvawareRouter(RoutingInterface):
                 0
             ]  # Get the first key
             matched_tokens = instance_id.layout_info[matched_instance_id][1]
+        timing_data['lookup_time'] = time.time() - lookup_start
+        # 寫入到全局簡化輸出（如有 timing_data）
+        try:
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data is not None:
+                request_timing_data.lookup_time = timing_data['lookup_time']
+                request_timing_data.matched_kvcache_tokens = int(matched_tokens if matched_tokens != math.inf else 0)
+                request_timing_data.request_tokens = int(len(token_ids))
+        except Exception:
+            pass
 
         if (
             instance_id is None
             or len(instance_id.layout_info) == 0
             or matched_tokens < max(len(token_ids) - self.threshold, 0)
         ):
-
+            # 步驟3: Hash routing !!!!!!!!!!!!!!!
+            hash_routing_start = time.time()
             session_id = request.headers.get(self.session_key, None)
             logger.debug(f"Got session id: {session_id}")
 
@@ -353,8 +391,20 @@ class KvawareRouter(RoutingInterface):
             else:
                 # Use the hash ring to get the endpoint for the session ID
                 url = self.hash_ring.get_node(session_id)
+            timing_data['hash_routing_time'] = time.time() - hash_routing_start
+            
+            # 計算總時間
+            timing_data['total_time'] = time.time() - start_time
+            
+            # 更新全局時間追蹤
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data:
+                timing_monitor.update_router_timing(request_timing_data, timing_data)
+            
             return url
         else:
+            # 步驟4: Instance mapping
+            instance_mapping_start = time.time()
             queried_instance_ids = [info for info in instance_id.layout_info]
             if queried_instance_ids[0] not in self.instance_id_to_url:
                 for endpoint in endpoints:
@@ -373,6 +423,16 @@ class KvawareRouter(RoutingInterface):
             logger.info(
                 f"Routing request to {queried_instance_ids[0]} found by kvaware router"
             )
+            timing_data['instance_mapping_time'] = time.time() - instance_mapping_start
+            
+            # 計算總時間
+            timing_data['total_time'] = time.time() - start_time
+            
+            # 更新全局時間追蹤
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data:
+                timing_monitor.update_router_timing(request_timing_data, timing_data)
+            
             return self.instance_id_to_url[queried_instance_ids[0]]
 
 
@@ -391,6 +451,7 @@ class PrefixAwareRouter(RoutingInterface):
 
         self.hashtrie = HashTrie()
         self._initialized = True
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     async def route_request(
         self,
@@ -416,15 +477,53 @@ class PrefixAwareRouter(RoutingInterface):
             request_json (Dict): The request body (needed for finding the
             longest prefix match)
         """
+        # 開始性能監控
+        start_time = time.time()
+        timing_data = {
+            'total_time': 0,
+            'tokenize_time': 0,
+            'lookup_time': 0,
+            'hash_routing_time': 0,
+            'instance_mapping_time': 0,
+            'find_best_matched_time': 0,
+            'find_best_ttft_time': 0,
+            'fallback_time': 0
+        }
+        
+        # 步驟1: Extract prompt !!!!!!!!!!!!!!!
+        extract_start = time.time()
         prompt = extract_prompt(request_json)
+        timing_data['tokenize_time'] = time.time() - extract_start
+        
+        # 步驟2: Longest prefix match（視作 Prefix 的 lookup） !!!!!!!!!!!!!!!
+        match_start = time.time()
         available_endpoints = set(endpoint.url for endpoint in endpoints)
         _, matched_endpoint = await self.hashtrie.longest_prefix_match(
             prompt, available_endpoints
         )
-
+        timing_data['lookup_time'] = time.time() - match_start
+        # 寫入到全局簡化輸出（如有 timing_data）
+        try:
+            request_timing_data = getattr(request.state, 'timing_data', None)
+            if request_timing_data is not None:
+                request_timing_data.lookup_time = timing_data['lookup_time']
+        except Exception:
+            pass
+        
+        # 步驟3: Select endpoint !!!!!!!!!!!!!!!
+        select_start = time.time()
         selected_endpoint = random.choice(list(matched_endpoint))
-
+        timing_data['hash_routing_time'] = time.time() - select_start
+        
+        # 步驟4: Insert to hashtrie !!!!!!!!!!!!!!!
+        insert_start = time.time()
         await self.hashtrie.insert(prompt, selected_endpoint)
+        timing_data['instance_mapping_time'] = time.time() - insert_start
+        
+        # 計算總時間
+        timing_data['total_time'] = time.time() - start_time
+        
+        # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
 
         return selected_endpoint
 
@@ -506,6 +605,7 @@ class TtftRouter(RoutingInterface):
         self.tokenizer_name = tokenizer_name
         self.tokenizer = None
         self.cached_prefix_tokens = None
+        # 移除舊的性能監控變量，現在使用統一的 RequestTimingMonitor
 
     def start_kv_manager(self):
         """
@@ -517,6 +617,8 @@ class TtftRouter(RoutingInterface):
         asyncio.run_coroutine_threadsafe(self.kv_manager.start_all(), self.loop)
         if self.tokenizer_name is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+
+    # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
     async def route_request(
         self,
@@ -542,30 +644,105 @@ class TtftRouter(RoutingInterface):
             request_json (Dist): The request body (needed for finding the
             longest prefix match)
         """
-        if self.tokenizer is None:
-            # fallback to use the model of the first endpoint as tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
-
-        token_ids = self.tokenizer.encode(extract_prompt(request_json))
+        # 開始性能監控
+        start_time = time.time()
+        
+        # 獲取全局時間追蹤監控器
+        timing_monitor = get_request_timing_monitor()
+        timing_data = {
+            'total_time': 0,
+            'tokenize_time': 0,
+            'lookup_time': 0,
+            'find_best_matched_time': 0,
+            'find_best_ttft_time': 0,
+            'fallback_time': 0
+        }
+        
         cache_info = RequestStatsCacheInfo()
-        cache_info.num_prefix_tokens = len(token_ids)
         try:
+            # 步驟1: Tokenize !!!!!!!!!!!!!!!
+            tokenize_start = time.time()
+            if self.tokenizer is None:
+                # fallback to use the model of the first endpoint as tokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(endpoints[0].model_names[0])
+
+            token_ids = self.tokenizer.encode(extract_prompt(request_json))
+            timing_data['tokenize_time'] = time.time() - tokenize_start
+            
+            # 步驟2: Lookup !!!!!!!!!!!!!!!
+            lookup_start = time.time()
             if request_stats is None:
                 raise ValueError("no request stats was provided")
+            # 僅計 FullLookupMsg 的用時
+            full_lookup_start = time.time()
             msg = FullLookupMsg(event_id="", tokens=token_ids)
             ret_msg = await self.kv_manager.handle_orchestration_message(msg)
             matched_infos = ret_msg.matched_info
+            timing_data['lookup_time'] = time.time() - full_lookup_start
+            # 寫入到全局簡化輸出（如有 timing_data）
+            try:
+                request_timing_data = getattr(request.state, 'timing_data', None)
+                if request_timing_data is not None:
+                    request_timing_data.lookup_time = timing_data['lookup_time']
+                    # 從 matched_infos 取最大匹配 token 數
+                    try:
+                        best = None
+                        for instance_info in matched_infos:
+                            score = instance_info[1][-1][1]
+                            if best is None or score > best:
+                                best = score
+                        matched_tokens = int(best or 0)
+                    except Exception:
+                        matched_tokens = 0
+                    request_timing_data.matched_kvcache_tokens = matched_tokens
+                    # TTFT 路由同樣使用 token_ids 長度
+                    request_timing_data.request_tokens = int(len(token_ids))
+            except Exception:
+                pass
+            
             if matched_infos:
+                # 步驟3: Find best matched !!!!!!!!!!!!!!!
+                find_best_start = time.time()
                 best_matched_info = self._find_best_matched(matched_infos)
                 best_ttft_url = await self._find_best_ttft(endpoints, matched_infos,
                                                            best_matched_info, request_stats)
-                cache_info.num_cached_tokens = best_matched_info[1][-1][1]
+                self.cached_prefix_tokens = best_matched_info[1][-1][1]
+                cache_info.num_cached_tokens = self.cached_prefix_tokens
+                timing_data['find_best_matched_time'] = time.time() - find_best_start
+                
+                # 步驟4: Find best TTFT !!!!!!!!!!!!!!!
+                find_ttft_start = time.time()
+                timing_data['find_best_ttft_time'] = time.time() - find_ttft_start
+                
+                # 計算總時間
+                timing_data['total_time'] = time.time() - start_time
+                
+                # 更新全局時間追蹤
+                request_timing_data = getattr(request.state, 'timing_data', None)
+                if request_timing_data:
+                    timing_monitor.update_router_timing(request_timing_data, timing_data)
+                
+                # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
                 return best_ttft_url, cache_info
         except ValueError:
             logger.info("Fallback to QPS routing due to:")
             logger.info(traceback.format_exc())
+        # 步驟5: Fallback routing !!!!!!!!!!!!!!!
+        fallback_start = time.time()
+        result = self._fallback_routing(endpoints, request_stats, request)
+        timing_data['fallback_time'] = time.time() - fallback_start
+        
+        # 計算總時間
+        timing_data['total_time'] = time.time() - start_time
+        
+        # 更新全局時間追蹤
+        request_timing_data = getattr(request.state, 'timing_data', None)
+        if request_timing_data:
+            timing_monitor.update_router_timing(request_timing_data, timing_data)
+        
+        # 移除舊的 CSV 邏輯，回傳與原介面相容
         cache_info.num_cached_tokens = 0
-        return self._fallback_routing(endpoints, request_stats, request), cache_info
+        return result, cache_info
 
     def _find_best_matched(self, matched_infos):
         best_matched_info = None
