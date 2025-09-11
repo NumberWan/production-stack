@@ -703,8 +703,9 @@ class TtftRouter(RoutingInterface):
                 # 步驟3: Find best matched !!!!!!!!!!!!!!!
                 find_best_start = time.time()
                 best_matched_info = self._find_best_matched(matched_infos)
-                best_ttft_url = await self._find_best_ttft(endpoints, matched_infos,
-                                                           best_matched_info, request_stats)
+                best_ttft_url, best_ttft = await self._find_best_ttft(
+                    endpoints, matched_infos, best_matched_info, request_stats
+                )
                 self.cached_prefix_tokens = best_matched_info[1][-1][1]
                 cache_info.num_cached_tokens = self.cached_prefix_tokens
                 timing_data['find_best_matched_time'] = time.time() - find_best_start
@@ -719,6 +720,7 @@ class TtftRouter(RoutingInterface):
                 # 更新全局時間追蹤
                 request_timing_data = getattr(request.state, 'timing_data', None)
                 if request_timing_data:
+                    request_timing_data.est_ttft = float(best_ttft)
                     timing_monitor.update_router_timing(request_timing_data, timing_data)
                 
                 # 移除舊的 CSV 寫入邏輯，現在使用統一的 RequestTimingMonitor
@@ -793,7 +795,7 @@ class TtftRouter(RoutingInterface):
 
         if best_ttft_url is None:
             raise ValueError(f"no best TTFT instance was found")
-        return best_ttft_url
+        return best_ttft_url, best_ttft
 
     def _estimate_ttft(self, matched_info, best_matched_info, stats):
         transfer_time = self._calc_transfer_time(matched_info, best_matched_info)

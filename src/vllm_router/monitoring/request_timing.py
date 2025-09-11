@@ -39,6 +39,8 @@ class RequestTimingData:
     # 衍生指標
     ttft: float = 0.0
     decode_time: float = 0.0
+    # 新增：預估 TTFT（由路由器估算）
+    est_ttft: float = 0.0
     
     # 詳細步驟時間
     request_parsing_time: float = 0.0
@@ -113,10 +115,17 @@ class RequestTimingMonitor:
                     "routing_logic",
                     "total_request_time",
                     "ttft",
+                    "est_ttft",
                     "decode_time",
                     "routing_decision_time",
                     "backend_connection_time",
                     "lookup_time",
+                    "tokenize_time",
+                    "hash_routing_time",
+                    "instance_mapping_time",
+                    "find_best_matched_time",
+                    "find_best_ttft_time",
+                    "fallback_time",
                     "matched_kvcache_tokens",
                     "request_tokens",
                     "status_code",
@@ -272,6 +281,7 @@ class RequestTimingMonitor:
                     timing_data.routing_logic,
                     f"{timing_data.total_request_time:.10f}",
                     f"{timing_data.ttft:.10f}",
+                    f"{timing_data.est_ttft:.10f}",
                     f"{timing_data.decode_time:.10f}",
                     f"{timing_data.routing_decision_time:.10f}",
                     f"{timing_data.backend_connection_time:.10f}",
