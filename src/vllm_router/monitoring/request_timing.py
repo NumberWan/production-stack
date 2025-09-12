@@ -80,7 +80,7 @@ class RequestTimingData:
 class RequestTimingMonitor:
     """完整的請求時間監控器"""
     
-    def __init__(self, output_dir: str = "/home/w00917303/"):
+    def __init__(self, output_dir: str = "/home/w00917303/0910/"):
         self.output_dir = output_dir
         self.count = 0
         self.lock = threading.Lock()

@@ -353,7 +353,7 @@ class KvawareRouter(RoutingInterface):
         
         # 步驟2: Lookup（僅計 LookupMsg 送出到返回的用時） !!!!!!!!!!!!!!!
         lookup_start = time.time()
-        msg = LookupMsg(tokens=token_ids)
+        msg = LookupMsg(tokens=token_ids, event_id="")
         instance_id = await self.query_manager(msg)
         matched_tokens = math.inf
         if len(list(instance_id.layout_info.keys())) > 0:
