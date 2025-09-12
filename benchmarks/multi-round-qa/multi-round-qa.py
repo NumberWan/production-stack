@@ -70,12 +70,15 @@ class UserConfig:
 
     @staticmethod
     def new_user_config(user_id: int, workload_config: WorkloadConfig) -> "UserConfig":
+        # 修正 QPS 計算：每個用戶的間隔應該是 1/qps 秒，而不是 num_users/qps
+        # 這樣才能正確控制總體 QPS
+        gap_between_requests = 1.0 / workload_config.qps if workload_config.qps > 0 else float('inf')
         return UserConfig(
             user_id=user_id,
             system_prompt_len=workload_config.system_prompt_len,
             user_info_len=workload_config.user_info_len,
             answer_len=workload_config.answer_len,
-            gap_between_requests=workload_config.num_users / workload_config.qps,
+            gap_between_requests=gap_between_requests,
             num_rounds=workload_config.num_rounds,
             enable_user_id=workload_config.enable_user_id,
         )
@@ -181,7 +184,8 @@ class RequestExecutor:
 
 
 class UserSession:
-
+    _pre_generated_texts = None
+    _current_index = 0
     def __init__(self, user_config: UserConfig, use_sharegpt=False, sharegpt_data=None):
         self.user_config = user_config
         self.last_request_time = None
@@ -204,12 +208,9 @@ class UserSession:
         self.generation_times = []
         self.launch_times = []
         self.finish_times = []
-
         self.finished = False
-
-        # Next randomized gap (seconds) to trigger next request
+        # Poisson arrival: next randomized gap for next request
         self.next_gap = None
-
     def _update_result(self, response: Response):
         self.prompt_lengths.append(response.prompt_tokens)
         self.generation_lengths.append(response.generation_tokens)
@@ -218,26 +219,31 @@ class UserSession:
         self.launch_times.append(response.launch_time)
         self.finish_times.append(response.finish_time)
 
+    def _ensure_dataset_loaded(self):
+        if UserSession._pre_generated_texts is None:
+            try:
+                # 從 CSV 加載預生成文本
+                df = pd.read_csv("/home/w00917303/production-stack/benchmarks/multi-round-qa/gen.csv")
+                UserSession._pre_generated_texts = df['text'].tolist()
+                logger.info(f"Loaded {len(UserSession._pre_generated_texts)} pre-generated texts")
+            except FileNotFoundError:
+                UserSession._pre_generated_texts = ["Default user text."] * 5000
+                logger.warning("gen.csv not found, using default texts")
+
+    def _next_dataset_text(self):
+        self._ensure_dataset_loaded()
+        text = UserSession._pre_generated_texts[UserSession._current_index]
+        UserSession._current_index = (UserSession._current_index + 1) % len(UserSession._pre_generated_texts)
+        return text
+
     def _build_system_prompt(self):
-
-        def gen_dummy_text(length):
-            return " ".join(["hi"] * length)
-
-        dummy_text_sys = gen_dummy_text(self.user_config.system_prompt_len)
-        dummy_text_user = gen_dummy_text(self.user_config.user_info_len)
-        system_prompt = (
-            f"Hi, here's some system prompt: {dummy_text_sys}."
-            + f"For user {self.user_config.user_id}, "
-            + f"here are some other context: {dummy_text_user}."
-        )
-        return system_prompt
+        # 忽略 system prompt（按你的需求）
+        return ""
 
     def _build_new_question(self):
+        # 使用數據集中的文本作為用戶 prompt（不再拼系統 prompt）
         self.question_id += 1
-        return (
-            f"Here's question #{self.question_id}: can you tell me "
-            + "a new long story with a happy ending?"
-        )
+        return self._next_dataset_text()
 
     def _launch_new_request(self, timestamp: float, request_executor: RequestExecutor):
         if self.use_sharegpt:
@@ -252,8 +258,7 @@ class UserSession:
             self.question_id += 1
         else:
             prompt = self._build_new_question()
-        if len(self.chat_history) == 0:
-            prompt = self._build_system_prompt() + prompt
+        # 不再在第一條消息拼接 system prompt
         self.chat_history.on_user_query(prompt)
         logger.debug(
             f"User {self.user_config.user_id} issues request {self.question_id}"
@@ -278,7 +283,7 @@ class UserSession:
         )
         self.has_unfinished_request = True
         self.last_request_time = timestamp
-        # Sample next gap after a request is launched
+        # sample next gap (exponential with mean = avg gap)
         self.next_gap = self._sample_gap()
 
     def _on_request_finished(self, response: Response):
@@ -318,7 +323,6 @@ class UserSession:
             return
 
         if self.last_request_time is None:
-            # First request; next_gap will be sampled after launch
             self._launch_new_request(timestamp, request_executor)
             return
 
@@ -327,10 +331,10 @@ class UserSession:
         if timestamp - self.last_request_time > target_gap:
             if self.has_unfinished_request:
                 if timestamp - self.last_unfinished_log > 10:
-                    logger.warning(
-                        f"User {self.user_config.user_id} has an unfinished "
-                        "request and unable to fit the QPS requirement."
-                    )
+                    # logger.warning(
+                    #     f"User {self.user_config.user_id} has an unfinished "
+                    #     "request and unable to fit the QPS requirement."
+                    # )
                     self.last_unfinished_log = timestamp
                 return
 
@@ -338,22 +342,36 @@ class UserSession:
             return
 
     def _sample_gap(self) -> float:
-        # Exponential distribution with mean = average gap per user
+        # Exponential distribution with mean = configured average gap per user
         avg = float(self.user_config.gap_between_requests)
-        # Guard against zero or very small average
         rate = 1.0 / max(1e-6, avg)
         return max(1e-6, random.expovariate(rate))
 
     def summary(self) -> pd.DataFrame:
+        n = len(self.prompt_lengths)
+        
+        # Ensure all lists are either truncated or padded to length n
+        def adjust_length(lst, n):
+            if len(lst) > n:
+                return lst[:n]  # Truncate if longer
+            elif len(lst) < n:
+                return lst + [None] * (n - len(lst))  # Pad with None if shorter
+            return lst
+        
+        generation_lengths = adjust_length(self.generation_lengths, n)
+        ttfts = adjust_length(self.ttfts, n)
+        generation_times = adjust_length(self.generation_times, n)
+        launch_times = adjust_length(self.launch_times, n)
+        finish_times = adjust_length(self.finish_times, n)
         df = pd.DataFrame()
         df["prompt_tokens"] = self.prompt_lengths
-        df["generation_tokens"] = self.generation_lengths
-        df["ttft"] = self.ttfts
-        df["generation_time"] = self.generation_times
+        df["generation_tokens"] = generation_lengths
+        df["ttft"] = ttfts
+        df["generation_time"] = generation_times
         df["user_id"] = self.user_config.user_id
-        df["question_id"] = range(1, len(self.prompt_lengths) + 1)
-        df["launch_time"] = self.launch_times
-        df["finish_time"] = self.finish_times
+        df["question_id"] = range(1, n + 1)
+        df["launch_time"] = launch_times
+        df["finish_time"] = finish_times
         return df
 
 
@@ -365,12 +383,17 @@ class UserSessionManager:
         self.workload_config = workload_config
         self.sessions = []
 
-        gap_between_requests_per_user = workload_config.num_users / workload_config.qps
+        # 修正 QPS 計算：每個用戶的間隔應該是 1/qps 秒
+        gap_between_requests_per_user = 1.0 / workload_config.qps if workload_config.qps > 0 else float('inf')
         session_alive_time = gap_between_requests_per_user * (
             workload_config.num_rounds - 1
         )
-        self.gap_between_users = session_alive_time / (workload_config.num_users + 0)
+        # 用戶之間的間隔應該根據 QPS 來計算，而不是基於 session_alive_time
+        # 為了避免所有用戶同時開始，我們讓用戶間隔 1/qps 秒開始
+        self.gap_between_users = gap_between_requests_per_user
         self.ramp_up_time = workload_config.num_users * self.gap_between_users
+        # Poisson user join: next randomized gap for next user join
+        self.next_user_join_gap = max(1e-6, random.expovariate(1.0 / max(1e-6, self.gap_between_users)))
 
         logger.info(
             f"Gap between users: {self.gap_between_users} secs.\n"
@@ -400,12 +423,11 @@ class UserSessionManager:
         logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
 
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
-        for i in range(self.workload_config.num_users):
+        # 修正：不要一次性創建所有用戶，而是按照 QPS 限制逐步創建
+        # 只創建第一個用戶，其他用戶會在後續的 step 中逐步加入
+        if len(self.sessions) == 0:
             new_session = self._create_user_session()
-            offset = ramp_up_time - i * self.gap_between_users
-            if offset < 0:
-                break
-            new_session.set_internal_state(offset, timestamp)
+            new_session.set_internal_state(0, timestamp)  # 第一個用戶立即開始
         self.need_ramp_up = False
 
     def _create_user_session(self):
@@ -442,15 +464,19 @@ class UserSessionManager:
         # Only check limit if max_unfinished_queries is set
         if (self.workload_config.max_unfinished_queries is not None and 
             pending_queries > self.workload_config.max_unfinished_queries):
-            logger.info(f"unfinished queries >{self.workload_config.max_unfinished_queries}, waiting")
+            #logger.info(f"unfinished queries >{self.workload_config.max_unfinished_queries}, waiting")
             return
 
-        if timestamp - self.last_user_join > self.gap_between_users:
+        # 修正：只有在未達到目標用戶數時才加入新用戶，並且按照 QPS 限制間隔加入
+        if (len(self.sessions) < self.workload_config.num_users and 
+            timestamp - self.last_user_join > self.next_user_join_gap):
             self._create_user_session()
             self.last_user_join = timestamp
+            # sample next user-join gap
+            self.next_user_join_gap = max(1e-6, random.expovariate(1.0 / max(1e-6, self.gap_between_users)))
             logger.info(
                 f"Joined a new user {self.user_id}, "
-                f"now active users: {len(self.sessions)}"
+                f"now active users: {len(self.sessions)}/{self.workload_config.num_users}"
             )
 
         for session in self.sessions:
@@ -581,13 +607,13 @@ def parse_arguments() -> WorkloadConfig:
     parser.add_argument(
         "--shared-system-prompt",
         type=int,
-        required=True,
+        default=0,
         help="Length of the shared system prompt (tokens)",
     )
     parser.add_argument(
         "--user-history-prompt",
         type=int,
-        required=True,
+        default=0,
         help="Length of the user-specific history prompt (tokens)",
     )
     parser.add_argument(
@@ -737,7 +763,7 @@ def main():
 
     logger.info(f"Finished benchmarking, dumping summary to {args.output}")
     summary = manager.summary(0, time.time())
-    summary.to_csv(args.output, index=False)
+    summary.to_csv("/home/w00917303/production-stack/benchmarks/multi-round-qa/summary.csv", index=False)
 
 
 if __name__ == "__main__":
