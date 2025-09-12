@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
+import random
 
 import openai
 import pandas as pd
@@ -206,6 +207,9 @@ class UserSession:
 
         self.finished = False
 
+        # Next randomized gap (seconds) to trigger next request
+        self.next_gap = None
+
     def _update_result(self, response: Response):
         self.prompt_lengths.append(response.prompt_tokens)
         self.generation_lengths.append(response.generation_tokens)
@@ -274,6 +278,8 @@ class UserSession:
         )
         self.has_unfinished_request = True
         self.last_request_time = timestamp
+        # Sample next gap after a request is launched
+        self.next_gap = self._sample_gap()
 
     def _on_request_finished(self, response: Response):
         self.chat_history.on_system_response(response.body)
@@ -312,10 +318,13 @@ class UserSession:
             return
 
         if self.last_request_time is None:
+            # First request; next_gap will be sampled after launch
             self._launch_new_request(timestamp, request_executor)
             return
 
-        if timestamp - self.last_request_time > self.user_config.gap_between_requests:
+        # Use randomized next_gap if available; fallback to average gap
+        target_gap = self.next_gap if self.next_gap is not None else self.user_config.gap_between_requests
+        if timestamp - self.last_request_time > target_gap:
             if self.has_unfinished_request:
                 if timestamp - self.last_unfinished_log > 10:
                     logger.warning(
@@ -327,6 +336,13 @@ class UserSession:
 
             self._launch_new_request(timestamp, request_executor)
             return
+
+    def _sample_gap(self) -> float:
+        # Exponential distribution with mean = average gap per user
+        avg = float(self.user_config.gap_between_requests)
+        # Guard against zero or very small average
+        rate = 1.0 / max(1e-6, avg)
+        return max(1e-6, random.expovariate(rate))
 
     def summary(self) -> pd.DataFrame:
         df = pd.DataFrame()
