@@ -38,6 +38,9 @@ try:
     )
 except ImportError:
     pass
+
+# Import our HTTP client
+from vllm_router.lmcache_http_client import LMCacheHTTPClient
 from uhashring import HashRing
 
 from vllm_router.log import init_logger
@@ -590,11 +593,10 @@ class TtftRouter(RoutingInterface):
         instance_id_to_url: Optional[Dict[str, str]] = None,
     ):
         logger.info(
-            f"Initializing TtftRouter with lmcache addr: 0.0.0.0:{lmcache_controller_port}"
+            f"Initializing TtftRouter with lmcache HTTP client at port: {lmcache_controller_port}"
         )
-        self.kv_manager = controller_manager.LMCacheControllerManager(
-            f"0.0.0.0:{lmcache_controller_port}"
-        )
+        # Use HTTP client instead of ZMQ controller manager
+        self.lmcache_client = LMCacheHTTPClient(f"http://localhost:{lmcache_controller_port}")
         if instance_id_to_url is None:
             self.instance_id_to_url = {}
         else:
@@ -608,14 +610,12 @@ class TtftRouter(RoutingInterface):
 
     def start_kv_manager(self):
         """
-        Start the kv manager
+        Start the kv manager (now using HTTP client, no async loop needed)
         """
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
-        self.thread.start()
-        asyncio.run_coroutine_threadsafe(self.kv_manager.start_all(), self.loop)
+        # No need for async loop with HTTP client
         if self.tokenizer_name is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        logger.info("LMCache HTTP client initialized successfully")
 
     # 移除舊的 CSV 寫入方法，現在使用統一的 RequestTimingMonitor
 
@@ -672,11 +672,10 @@ class TtftRouter(RoutingInterface):
             lookup_start = time.time()
             if request_stats is None:
                 raise ValueError("no request stats was provided")
-            # 僅計 FullLookupMsg 的用時
+            # 使用 HTTP 客戶端進行 full_lookup
             full_lookup_start = time.time()
-            msg = FullLookupMsg(tokens=token_ids)
-            ret_msg = await self.kv_manager.handle_orchestration_message(msg)
-            matched_infos = ret_msg.matched_info
+            lookup_result = await self.lmcache_client.full_lookup(token_ids)
+            matched_infos = lookup_result.get("matched_info", [])
             timing_data['lookup_time'] = time.time() - full_lookup_start
             # 寫入到全局簡化輸出（如有 timing_data）
             try:
